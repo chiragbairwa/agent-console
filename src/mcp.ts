@@ -37,7 +37,7 @@ export type CallTool = (tool: string, args: unknown) => Promise<ToolReply>;
 
 /** The MCP server for one role. `call` runs a tool: in-process (HTTP) or through the API (stdio). */
 export function buildMcpServer(role: Role, call: CallTool): McpServer {
-  const server = new McpServer({ name: 'agent-console', version: '0.3.0' });
+  const server = new McpServer({ name: 'agent-console', version: '0.4.0' });
   const specs = SPECS_BY_ROLE[role];
   for (const [tool, spec] of Object.entries(specs)) {
     server.registerTool(tool, { description: spec.description, inputSchema: spec.input }, async (args: unknown) => {
