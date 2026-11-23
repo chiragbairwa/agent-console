@@ -4,3 +4,4 @@ build/
 dist/
 artifacts/
 *.tsbuildinfo
+assets/icon.iconset

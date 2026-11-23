@@ -4,7 +4,7 @@ export default {
 	app: {
 		name: "Agent Console",
 		identifier: "dev.agentconsole.desktop",
-		version: "0.1.0",
+		version: "0.1.1",
 	},
 	// Closing the window keeps the tray icon; Quit in the tray ends the app.
 	runtime: { exitOnLastWindowClosed: false },
@@ -17,7 +17,7 @@ export default {
 		},
 		// The system webview: WebKitGTK on Linux, WKWebView on macOS, WebView2 on Windows. No Chromium bundled.
 		linux: { bundleCEF: false, icon: "assets/icon-512.png" },
-		mac: { bundleCEF: false },
+		mac: { bundleCEF: false, icons: "assets/icon.iconset" }, // made by scripts/mac-iconset.sh
 		win: { bundleCEF: false, icon: "assets/icon-256.png" },
 	},
 } satisfies ElectrobunConfig;
