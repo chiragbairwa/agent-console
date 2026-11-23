@@ -1,0 +1,21 @@
+{
+  "name": "agent-console",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "install-bin": "bun run scripts/build.ts && install -m 755 dist/agent-console ~/.local/bin/agent-console"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
+  }
+}

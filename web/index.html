@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Console</title>
+<meta name="theme-color" content="#3b6ef5">
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<div id="app">
+  <div class="top">
+    <h1>Agent Console</h1>
+    <span id="conn" class="conn off" title="Server connection">● offline</span>
+    <span class="seg" id="viewSeg" title="Show live terminals or the steps of each agent"><button data-v="term">Terminals</button><button data-v="flow">Flow</button></span>
+    <button class="tb" id="bAdvisor" title="Choose which agent is the advisor" hidden>Advisor</button>
+    <button class="tb" id="bTheme" title="Theme: follow the system, light, or dark">Theme: Auto</button>
+    <button class="tb" id="bImport" title="Pull in Claude sessions running in your own terminals">Import Sessions</button>
+    <button class="tb" id="bFit" title="Fit all (F)">Fit All</button>
+    <button class="tb" id="bLayout">Auto Layout</button>
+    <button class="tb" id="bSelAll" title="Select all workers (A)">Select All</button>
+    <button class="tb" id="bClear">Clear Selection</button>
+    <div class="legend"><span><i></i>advisor link</span><span><i class="y"></i>your link</span><span><i class="t"></i>talking now</span></div>
+  </div>
+  <div id="kpis" hidden></div>
+  <div class="main">
+    <div id="vp">
+      <div id="world"><svg id="wires"><g id="gl"></g><g id="gp"></g></svg></div>
+      <div id="hint">Drag the background to pan · Ctrl+scroll to zoom · double-click a title bar to focus · drag the ● port to connect</div>
+      <svg id="mini"></svg>
+      <div id="zoom"><button class="ib" id="zOut" title="Zoom out">−</button><span id="zLbl">100%</span><button class="ib" id="zIn" title="Zoom in">+</button></div>
+      <div id="focus" hidden>
+        <div class="fhd">
+          <button class="tb" id="fBack">◀ Back to Map <kbd>Shift+Esc</kbd></button>
+          <span class="dot" id="fDot"></span><h2 id="fName"></h2><span class="repo" id="fRepo"></span>
+          <span class="grow"></span>
+          <button class="tb" id="fInfo" title="Show or hide the details panel">Details</button>
+          <button class="tb" id="fInt">Interrupt</button>
+          <button class="tb" id="fEditor">Open in VS Code</button>
+          <button class="tb" id="fStop">Stop</button>
+        </div>
+        <div class="fbody" id="fBody">
+          <div class="fterm" id="fTerm"></div>
+          <div class="finfo"><h3>Details</h3><dl id="fDl"></dl></div>
+        </div>
+        <div class="strip" id="fStrip"></div>
+      </div>
+    </div>
+    <aside>
+      <section><h3>Needs You <span id="nCount"></span></h3><div id="needs"></div></section>
+      <section><h3>Selection</h3><div id="selInfo" class="empty"></div></section>
+      <section><h3>Add Worker</h3>
+        <form id="addForm" class="addw">
+          <div class="seg agents" id="addAgent" title="Which agent runs in the new worker"></div>
+          <select id="addRepo"><option value="">Repository…</option></select>
+          <button type="button" class="tb" id="addBrowse" title="Pick any folder on this computer">Browse Folders…</button>
+          <div id="addPicked" class="picked" hidden></div>
+          <input id="addName" placeholder="Name (optional)">
+          <input id="addBranch" placeholder="New worktree branch (optional)">
+          <input id="addBase" list="addBaseList" placeholder="From branch (default: current)" autocomplete="off" hidden>
+          <datalist id="addBaseList"></datalist>
+          <div class="agentopts" id="addOpts" hidden></div>
+          <select id="addTpl"><option value="">No template</option></select>
+          <button class="tb" id="addStart">Start Worker</button>
+        </form>
+      </section>
+      <section><h3>Activity</h3><div class="feed" id="feed"></div></section>
+    </aside>
+  </div>
+  <form class="cmd" id="cmdForm">
+    <span id="target">→ Advisor</span>
+    <input id="cmdin" autocomplete="off" placeholder="Talk to the advisor. @name … sends to one worker. Shift+click title bars to send to several.  ( / to type )">
+    <button class="send">Send</button>
+  </form>
+</div>
+<script type="module" src="./app.ts"></script>
+</body>
+</html>
