@@ -1,41 +1,53 @@
 # Builds Agent Console for Linux, macOS and Windows and attaches the files to a GitHub Release.
-# Push a tag such as v0.3.0 to start it. "Run workflow" (manual start) builds the files
-# but makes no release.
+#
+# - Push a tag such as v0.4.0: the workflow builds that tag and makes its release.
+# - Run workflow (manual start) with a tag: the workflow builds the default branch and
+#   updates the release of that existing tag. The tag does not move.
+#
+# The release text is release-notes/<tag>.md. The workflow stops when that file is missing.
 name: release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to update, for example v0.3.0"
+        required: true
 
 permissions:
   contents: read
 
 env:
-  BUN_VERSION: "1.4.2"
+  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  ELECTROBUN: electrobun@2.0.7
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - name: Check the release notes
+        run: |
+          test -s "release-notes/$TAG.md" || { echo "::error::release-notes/$TAG.md is missing"; exit 1; }
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: ${{ env.BUN_VERSION }}
+          bun-version: latest
       - run: sudo apt-get update && sudo apt-get install -y tmux
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun test
 
-  # One Linux runner cross-compiles the CLI for all targets. No macOS or Windows runner is needed.
+  # One Linux runner cross-compiles the CLI for all targets.
   cli:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: ${{ env.BUN_VERSION }}
+          bun-version: latest
       - run: bun install --frozen-lockfile
       - name: Build the CLI for each target
         run: |
@@ -53,68 +65,134 @@ jobs:
             fi
           done
           ls -l out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cli
           path: out/*
+          if-no-files-found: error
+      # The Linux packages need the Linux CLI binary.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cli-linux-x64-bin
+          path: build/linux-x64/agent-console
+          if-no-files-found: error
 
   # The desktop app (Electrobun) needs a native runner for each OS.
   desktop:
-    needs: test
+    needs: cli
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            name: linux
+          - os: macos-latest
+            name: macos
+          - os: windows-latest
+            name: windows
     runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: ${{ env.BUN_VERSION }}
-      - uses: actions/setup-node@v4
+          bun-version: latest
+      - uses: actions/setup-node@v7
         with:
-          node-version: "22"
-      - name: Install the Linux webview libraries
+          node-version: lts/*
+      - name: Set the version
+        run: echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+      - name: Install the Linux libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
-      - name: Install Hutch (from the electrobun npm package)
-        run: |
-          npx -y electrobun@2.0.7 --version || true
-          echo "$HOME/.hutch/bin" >> "$GITHUB_PATH"
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
+      - name: Make the macOS icon
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        run: sh scripts/mac-iconset.sh
       - name: Build the desktop app
         working-directory: desktop
         run: |
-          hutch --version
-          hutch install --frozen-lockfile
-          hutch run build
-          ls -l artifacts
-      - uses: actions/upload-artifact@v4
+          npx -y "$ELECTROBUN" build --env=stable
+          ls -lR artifacts
+
+      - uses: actions/download-artifact@v8
+        if: runner.os == 'Linux'
         with:
-          name: desktop-${{ runner.os }}
-          path: desktop/artifacts/*
+          name: cli-linux-x64-bin
+          path: ${{ runner.temp }}/cli
+      - name: Package for Linux (.deb, AppImage)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          gh release download continuous --repo AppImage/appimagetool --pattern 'appimagetool-x86_64.AppImage' --dir "$RUNNER_TEMP"
+          chmod +x "$RUNNER_TEMP/appimagetool-x86_64.AppImage" "$RUNNER_TEMP/cli/agent-console"
+          # No FUSE on the runner: the AppImage tool unpacks itself and runs.
+          APPIMAGE_EXTRACT_AND_RUN=1 APPIMAGETOOL="$RUNNER_TEMP/appimagetool-x86_64.AppImage" \
+            scripts/package-linux.sh "$VERSION" "$RUNNER_TEMP/cli/agent-console" \
+            desktop/artifacts/stable-linux-x64-AgentConsole.tar.zst out
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Package for macOS
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          dmg=$(ls desktop/artifacts/*.dmg 2>/dev/null | head -1 || true)
+          if [ -n "$dmg" ]; then
+            cp "$dmg" "out/AgentConsole-$VERSION-macos-arm64.dmg"
+          else
+            app=$(find desktop/build -maxdepth 3 -name '*.app' -type d | head -1)
+            [ -n "$app" ] || { echo "::error::no .dmg and no .app found"; exit 1; }
+            ditto -c -k --keepParent "$app" "out/AgentConsole-$VERSION-macos-arm64.zip"
+          fi
+
+      - name: Package for Windows
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          n=0
+          for f in desktop/artifacts/*Setup*; do
+            [ -e "$f" ] || continue
+            ext="${f##*Setup}"
+            cp "$f" "out/AgentConsole-$VERSION-windows-x64-Setup$ext"; n=$((n+1))
+          done
+          [ "$n" -gt 0 ] || { echo "::error::no Setup file in desktop/artifacts"; exit 1; }
+
+      - run: ls -l out
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-${{ matrix.name }}
+          path: out/*
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v') && !cancelled() && needs.cli.result == 'success'
-    needs: [cli, desktop]
+    needs: [test, cli, desktop]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
+          name: cli
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
           path: dist
           merge-multiple: true
       - name: Make SHA256SUMS
         run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ env.TAG }}
+          name: Agent Console ${{ env.TAG }}
+          body_path: release-notes/${{ env.TAG }}.md
           files: dist/*
-          generate_release_notes: true
-          body: |
-            The files are not signed. On macOS, right-click the app and click Open the first time.
-            On Windows, SmartScreen can show a warning: click More info, then Run anyway.
-            The CLI needs tmux. On Windows, run the Linux CLI in WSL.
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          make_latest: true
