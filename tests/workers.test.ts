@@ -565,3 +565,379 @@ describe('Registry.swapAdvisor', () => {
     } finally { delete ADAPTERS.stub; }
   });
 });
+
+describe('Registry reviewer seat', () => {
+  const ADV = 'ADVISOR RULES';
+  const REV = 'REVIEWER RULES';
+  async function mkSeats(leadAgent = 'claude', revAgent = 'codex'): Promise<Registry> {
+    process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-reg-'));
+    const r = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', now: () => now, exec: async () => {}, advisorPrompt: ADV, reviewerPrompt: REV, swapSettleMs: 0 });
+    r.addEventListener('event', e => events.push((e as CustomEvent<StateEvent>).detail));
+    await r.spawn({ name: 'Advisor', repo: '/r/a', role: 'advisor', agent: leadAgent });
+    await r.addReviewer(revAgent);
+    return r;
+  }
+  const lastCmd = () => tmux.of('newSession').at(-1)!.args[3] as string[];
+  const acts = (r: Registry) => r.snapshot().state.activity.map(a => a.text);
+
+  test('addReviewer: id reviewer, role reviewer, own agent, lead cwd, position right of the lead, one link', async () => {
+    const r = await mkSeats();
+    const lead = r.get('advisor')!;
+    const rev = r.get('reviewer')!;
+    expect(rev.role).toBe('reviewer');
+    expect(rev.agent).toBe('codex');
+    expect(rev.cwd).toBe(lead.cwd);
+    expect(rev.x).toBe(lead.x + (lead.w ?? 760) + 60);
+    expect(rev.y).toBe(lead.y);
+    expect(r.links().filter(l => l.a === 'reviewer' || l.b === 'reviewer').map(l => [l.a, l.b].sort())).toEqual([['advisor', 'reviewer']]);
+    expect(acts(r)).toContain('Added a reviewer (Codex).');
+  });
+
+  test('addReviewer uses the width of the lead when it was resized', async () => {
+    process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-reg-'));
+    const r = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', exec: async () => {} });
+    await r.spawn({ name: 'Advisor', repo: '/r/a', role: 'advisor' });
+    r.resize('advisor', 900, 500);
+    await r.addReviewer('claude');
+    expect(r.get('reviewer')!.x).toBe(r.get('advisor')!.x + 900 + 60);
+  });
+
+  test('addReviewer errors: a reviewer exists, no advisor, unknown agent, agent without caps.advisor', async () => {
+    const r = await mkSeats();
+    await expect(r.addReviewer('claude')).rejects.toThrow('a reviewer exists');
+    process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-reg-'));
+    const r2 = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', exec: async () => {} });
+    await expect(r2.addReviewer('claude')).rejects.toThrow('no advisor');
+    await expect(r.addReviewer('nope')).rejects.toThrow('unknown agent');
+    await expect(r.addReviewer('toString')).rejects.toThrow('unknown agent');
+    ADAPTERS.stub = { ...ADAPTERS.codex!, id: 'stub', label: 'Stub', caps: { ...ADAPTERS.codex!.caps, advisor: false } };
+    try {
+      await r2.spawn({ name: 'Advisor', repo: '/r/a', role: 'advisor' });
+      await expect(r2.addReviewer('stub')).rejects.toThrow('Stub cannot be the reviewer');
+      expect(r2.get('reviewer')).toBeUndefined();
+    } finally { delete ADAPTERS.stub; }
+  });
+
+  test('the reviewer gets the reviewer rules; the lead keeps the advisor rules (both adapters)', async () => {
+    const r = await mkSeats('claude', 'codex');
+    const di = lastCmd().find(a => a.startsWith('developer_instructions='))!;
+    expect(JSON.parse(di.slice('developer_instructions='.length))).toBe(REV);
+    await r.removeReviewer();
+    await r.addReviewer('claude');
+    const c = lastCmd();
+    expect(c[c.indexOf('--append-system-prompt') + 1]).toBe(REV);
+    const first = tmux.of('newSession')[0]!.args[3] as string[];
+    expect(first[first.indexOf('--append-system-prompt') + 1]).toBe(ADV);
+  });
+
+  test('connect refuses a reviewer–worker pair for both by values and either order', async () => {
+    const r = await mkSeats();
+    const w = await r.spawn({ name: 'Nova', repo: '/r/b' });
+    expect(r.connect('reviewer', w.id, 'advisor')).toBe(false);
+    expect(r.connect(w.id, 'reviewer', 'you')).toBe(false);
+    expect(r.connect('reviewer', w.id, 'you')).toBe(false);
+    expect(r.linked('reviewer', w.id)).toBe(false);
+    // The reviewer keeps its one link, and a new worker is not linked to it.
+    expect(r.links().filter(l => l.a === 'reviewer' || l.b === 'reviewer').length).toBe(1);
+    expect(r.linked('advisor', w.id)).toBe(true);
+  });
+
+  test('removeReviewer: needs denied, queue cleared, link removed, lead keeps running (Review Focus 5)', async () => {
+    const r = await mkSeats();
+    const w = await r.spawn({ name: 'Nova', repo: '/r/b' });
+    r.addNeed({ id: 'reviewer', kind: 'permission', text: 'p' });
+    r.addNeed({ id: 'advisor', kind: 'permission', text: 'lead need' });
+    r.toolStart('reviewer');
+    await r.deliver('advisor', 'reviewer', 'q1');
+    expect(r.queuedFor('reviewer')).toBe(1);
+    const killsBefore = tmux.of('kill').length;
+    await r.removeReviewer();
+    expect(r.get('reviewer')).toBeUndefined();
+    expect(r.needs().map(n => n.id)).toEqual(['advisor']);
+    expect(r.queuedFor('reviewer')).toBe(0);
+    expect(events.some(e => e.t === 'queued' && e.id === 'reviewer' && e.count === 0)).toBe(true);
+    expect(r.links().some(l => l.a === 'reviewer' || l.b === 'reviewer')).toBe(false);
+    expect(tmux.of('kill').slice(killsBefore).map(c => c.args[0])).toEqual(['ac-reviewer']);
+    expect(r.get('advisor')!.status).not.toBe('stopped');
+    expect(r.linked('advisor', w.id)).toBe(true);
+    expect(acts(r)).toContain('Removed the reviewer.');
+    await expect(r.removeReviewer()).rejects.toThrow('no reviewer');
+  });
+
+  test('swapSeat reviewer: saves its session, resumes from its own lastSessions, own settle mark', async () => {
+    const r = await mkSeats('claude', 'codex');
+    r.update('reviewer', { sessionId: 'cx-1' });
+    r.update('advisor', { sessionId: 'cl-lead' });
+    await r.swapSeat('reviewer', 'claude');
+    expect(r.get('reviewer')!.agent).toBe('claude');
+    expect(r.get('reviewer')!.lastSessions).toEqual({ codex: 'cx-1' });
+    expect(r.get('advisor')!.agent).toBe('claude');
+    expect(r.get('advisor')!.lastSessions).toBeUndefined();
+    expect(tmux.of('kill').at(-1)!.args[0]).toBe('ac-reviewer');
+    expect(acts(r)).toContain('Reviewer switched from Codex to Claude.');
+    r.update('reviewer', { sessionId: 'cl-1' });
+    await r.swapSeat('reviewer', 'codex');
+    const cmd = lastCmd();
+    expect(cmd[0]).toBe('codex');
+    expect(cmd.slice(cmd.indexOf('resume'))).toContain('cx-1');
+  });
+
+  test('swapSeat reviewer: need denial, dropped-queue line, start failure stops it (phase-4 rules)', async () => {
+    const r = await mkSeats();
+    r.addNeed({ id: 'reviewer', kind: 'permission', text: 'p' });
+    r.toolStart('reviewer');
+    await r.deliver('advisor', 'reviewer', 'hello');
+    await r.swapSeat('reviewer', 'claude');
+    expect(r.needs().length).toBe(0);
+    expect(r.queuedFor('reviewer')).toBe(0);
+    expect(acts(r)).toContain('Dropped 1 queued message(s) for the reviewer (swap).');
+    const orig = tmux.newSession.bind(tmux);
+    let once = true;
+    tmux.newSession = async (...a: Parameters<typeof orig>) => { if (once) { once = false; throw new Error('boom'); } return orig(...a); };
+    await expect(r.swapSeat('reviewer', 'codex')).rejects.toThrow('boom');
+    expect(r.get('reviewer')!.status).toBe('stopped');
+    expect(r.get('reviewer')!.task).toBe('Swap failed: boom');
+    expect(r.get('advisor')!.status).not.toBe('stopped');
+    await r.swapSeat('reviewer', 'codex');
+  });
+
+  test('swapSeat reviewer settle timer is per seat: a swap of the lead does not cancel it', async () => {
+    const r = await mkSeats('claude', 'codex');
+    (r as any).opts.swapSettleMs = 30;
+    await r.swapSeat('reviewer', 'claude');
+    await r.swapSeat('advisor', 'codex');
+    expect(await r.deliver('you', 'reviewer', 'x')).toBe('queued');
+    expect(await r.deliver('you', 'advisor', 'y')).toBe('queued');
+    await new Promise(res => setTimeout(res, 80));
+    expect(tmux.of('sendText').map(c => c.args[0]).sort()).toEqual(['ac-advisor', 'ac-reviewer']);
+  });
+
+  test('swapSeat: one lock for both seats; the unknown seat and a missing reviewer are errors', async () => {
+    const r = await mkSeats();
+    const first = r.swapSeat('reviewer', 'claude');
+    await expect(r.swapSeat('advisor', 'codex')).rejects.toThrow('a swap is already running');
+    await first;
+    await expect(r.swapSeat('reviewer', 'nope')).rejects.toThrow('unknown agent');
+    await r.removeReviewer();
+    await expect(r.swapSeat('reviewer', 'codex')).rejects.toThrow('no reviewer');
+    await r.swapAdvisor('codex');
+    expect(r.get('advisor')!.agent).toBe('codex');
+  });
+
+  test('swapRoles: advisor first, then reviewer, each resumes from its own lastSessions', async () => {
+    const r = await mkSeats('claude', 'codex');
+    r.update('advisor', { sessionId: 'cl-1' });
+    r.update('reviewer', { sessionId: 'cx-1' });
+    const res = await r.swapRoles();
+    expect(res.advisor.agent).toBe('codex');
+    expect(res.reviewer.agent).toBe('claude');
+    expect(r.get('advisor')!.lastSessions).toEqual({ claude: 'cl-1' });
+    expect(r.get('reviewer')!.lastSessions).toEqual({ codex: 'cx-1' });
+    expect(tmux.of('kill').slice(-2).map(c => c.args[0])).toEqual(['ac-advisor', 'ac-reviewer']);
+    // Swap back: each seat resumes the agent it held before.
+    r.update('advisor', { sessionId: 'cx-2' });
+    r.update('reviewer', { sessionId: 'cl-2' });
+    await r.swapRoles();
+    expect(r.get('advisor')!.sessionId).toBe('cl-1');
+    expect(r.get('reviewer')!.sessionId).toBe('cx-1');
+    // Both timers ran: both seats take messages.
+    expect(await r.deliver('you', 'advisor', 'a')).toBe('sent');
+    expect(await r.deliver('you', 'reviewer', 'b')).toBe('sent');
+  });
+
+  test('swapRoles with the same agent changes nothing', async () => {
+    const r = await mkSeats('claude', 'claude');
+    const kills = tmux.of('kill').length;
+    const res = await r.swapRoles();
+    expect(res.advisor.agent).toBe('claude');
+    expect(res.reviewer.agent).toBe('claude');
+    expect(tmux.of('kill').length).toBe(kills);
+  });
+
+  test('swapRoles with no reviewer, or while a seat swaps → error, nothing stops (Review Focus 4)', async () => {
+    process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-reg-'));
+    const solo = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', exec: async () => {} });
+    await solo.spawn({ name: 'Advisor', repo: '/r/a', role: 'advisor' });
+    await expect(solo.swapRoles()).rejects.toThrow('no reviewer');
+    expect(tmux.of('kill').length).toBe(0);
+    const r = await mkSeats('claude', 'codex');
+    const kills = tmux.of('kill').length;
+    const first = r.swapSeat('advisor', 'codex');
+    await expect(r.swapRoles()).rejects.toThrow('a swap is already running');
+    await first;
+    expect(tmux.of('kill').length).toBe(kills + 1);
+    await r.swapSeat('reviewer', 'claude');
+    const p = r.swapRoles();
+    await expect(r.swapSeat('reviewer', 'codex')).rejects.toThrow('a swap is already running');
+    await p;
+  });
+
+  test('swapRoles: an agent that cannot advise → error before any kill', async () => {
+    const r = await mkSeats('claude', 'codex');
+    const kills = tmux.of('kill').length;
+    ADAPTERS.codex!.caps.advisor = false;
+    try { await expect(r.swapRoles()).rejects.toThrow('cannot be the advisor'); }
+    finally { ADAPTERS.codex!.caps.advisor = true; }
+    expect(tmux.of('kill').length).toBe(kills);
+  });
+
+  test('removeReviewer during a reviewer swap is refused; one session and the worker remain', async () => {
+    const r = await mkSeats('claude', 'codex');
+    const orig = tmux.newSession.bind(tmux);
+    let release!: () => void;
+    tmux.newSession = async (...a: Parameters<typeof orig>) => { await new Promise<void>(res => { release = res; }); return orig(...a); };
+    const p = r.swapSeat('reviewer', 'claude');
+    await new Promise(res => setTimeout(res, 10));
+    await expect(r.removeReviewer()).rejects.toThrow('a swap is already running');
+    release();
+    await p;
+    expect(r.get('reviewer')).toBeDefined();
+    expect([...tmux.sessions].filter(n => n === 'ac-reviewer').length).toBe(1);
+  });
+
+  test('the generic remove clears the settle timer and the busy mark of the reviewer', async () => {
+    const r = await mkSeats('claude', 'codex');
+    (r as any).opts.swapSettleMs = 40;
+    await r.swapSeat('reviewer', 'claude');
+    await r.remove('reviewer');
+    expect((r as any).settleTimers.size).toBe(0);
+    await r.addReviewer('codex');
+    expect(await r.deliver('you', 'reviewer', 'x')).toBe('sent');
+  });
+
+  test('swapRoles: the second seat fails to start; advisor swapped, reviewer stopped, lock released', async () => {
+    const r = await mkSeats('claude', 'codex');
+    const orig = tmux.newSession.bind(tmux);
+    let n = 0;
+    tmux.newSession = async (...a: Parameters<typeof orig>) => { if (++n === 2) throw new Error('boom'); return orig(...a); };
+    await expect(r.swapRoles()).rejects.toThrow('boom');
+    expect(r.get('advisor')!.agent).toBe('codex');
+    expect(r.get('reviewer')!.status).toBe('stopped');
+    expect(r.get('reviewer')!.task).toBe('Swap failed: boom');
+    await r.swapRoles();
+    await r.removeReviewer();
+  });
+
+  test('the generic remove of a seat during its swap is refused; a worker can still be removed', async () => {
+    const r = await mkSeats('claude', 'codex');
+    const w = await r.spawn({ name: 'Nova', repo: '/r/b' });
+    const orig = tmux.newSession.bind(tmux);
+    let release!: () => void;
+    tmux.newSession = async (...a: Parameters<typeof orig>) => { await new Promise<void>(res => { release = res; }); return orig(...a); };
+    const p = r.swapSeat('advisor', 'codex');
+    await new Promise(res => setTimeout(res, 10));
+    await expect(r.remove('advisor')).rejects.toThrow('a swap is already running');
+    await expect(r.remove('reviewer')).rejects.toThrow('a swap is already running');
+    await r.remove(w.id);
+    expect(r.get(w.id)).toBeUndefined();
+    release();
+    await p;
+    expect(r.get('advisor')).toBeDefined();
+    expect([...tmux.sessions].filter(n => n === 'ac-advisor').length).toBe(1);
+  });
+});
+
+describe('seat ids are reserved (final review I1)', () => {
+  test('a worker named Reviewer or Advisor gets another id; addReviewer still works', async () => {
+    const r = mkReg();
+    await r.spawn({ name: 'Advisor', repo: '/r/a', role: 'advisor' });
+    const w1 = await r.spawn({ name: 'Reviewer', repo: '/r/b' });
+    const w2 = await r.spawn({ name: 'Advisor', repo: '/r/c' });
+    expect(w1.id).toBe('reviewer-2');
+    expect(w1.role).toBe('worker');
+    expect(w2.id).toBe('advisor-2');
+    expect(r.reviewer()).toBeUndefined();
+    const rev = await r.addReviewer('claude');
+    expect(rev.id).toBe('reviewer');
+    expect(r.reviewer()?.id).toBe('reviewer');
+    expect(r.workers().filter(w => w.role === 'reviewer').length).toBe(1);
+  });
+
+  test('link and adopt do not take a seat id', () => {
+    const r = mkReg();
+    const w = r.link({ pid: 1, sessionId: 's1', name: 'Reviewer', cwd: '/r/x', status: 'idle' } as any);
+    expect(w.id).toBe('reviewer-2');
+  });
+
+  test('old state: a worker with id reviewer stays a worker; addReviewer refuses', async () => {
+    saveState({
+      workers: [
+        { id: 'advisor', name: 'Advisor', role: 'advisor', cwd: '/r/a', repo: 'a', status: 'idle', task: 't', x: 0, y: 0 },
+        { id: 'reviewer', name: 'Reviewer', role: 'worker', cwd: '/r/b', repo: 'b', status: 'idle', task: 't', x: 0, y: 0 },
+      ], links: [], cut: [], activity: [],
+    });
+    tmux.sessions.add('ac-reviewer');
+    const r = mkReg();
+    await r.discover();
+    expect(r.get('reviewer')!.role).toBe('worker');
+    await expect(r.addReviewer('claude')).rejects.toThrow('id reviewer is taken by a worker; rename or remove it');
+    expect(r.get('reviewer')!.role).toBe('worker');
+    expect(r.reviewer()).toBeUndefined();
+    await expect(r.removeReviewer()).rejects.toThrow('no reviewer');
+  });
+
+  test('discover: an unknown ac-reviewer session becomes the seat by its id', async () => {
+    tmux.sessions.add('ac-reviewer');
+    const r = mkReg();
+    await r.discover();
+    expect(r.reviewer()?.id).toBe('reviewer');
+  });
+});
+
+describe('a cut lead-reviewer link (final review I2)', () => {
+  async function seats() {
+    const r = mkReg();
+    await r.spawn({ name: 'Advisor', repo: '/r/a', role: 'advisor' });
+    await r.addReviewer('claude');
+    return r;
+  }
+  test('removeReviewer drops the cut key; a new reviewer gets its wire', async () => {
+    const r = await seats();
+    r.cut('advisor', 'reviewer');
+    expect(r.snapshot().state.cut).toContain(linkKey('advisor', 'reviewer'));
+    await r.removeReviewer();
+    expect(r.snapshot().state.cut).not.toContain(linkKey('advisor', 'reviewer'));
+    await r.addReviewer('claude');
+    expect(r.linked('advisor', 'reviewer')).toBe(true);
+  });
+
+  test('removing the advisor keeps the user cuts of advisor-worker links', async () => {
+    const r = await seats();
+    const w = await r.spawn({ name: 'Nova', repo: '/r/s' });
+    r.cut('advisor', w.id);
+    await r.remove('advisor');
+    expect(r.snapshot().state.cut).toContain(linkKey('advisor', w.id));
+    await ensureAdvisor(r, loadConfig());
+    expect(r.linked('advisor', w.id)).toBe(false);
+  });
+
+  test('addReviewer links even when a stale cut key exists', async () => {
+    const r = mkReg();
+    await r.spawn({ name: 'Advisor', repo: '/r/a', role: 'advisor' });
+    r.cut('advisor', 'reviewer');
+    await r.addReviewer('claude');
+    expect(r.linked('advisor', 'reviewer')).toBe(true);
+    expect(r.snapshot().state.cut).not.toContain(linkKey('advisor', 'reviewer'));
+  });
+});
+
+describe('seat restart and stop during a swap (final review M1)', () => {
+  test('restart and stop of a seat throw while a swap runs; a worker is fine', async () => {
+    const r = mkReg();
+    await r.spawn({ name: 'Advisor', repo: '/r/a', role: 'advisor' });
+    await r.addReviewer('codex');
+    const w = await r.spawn({ name: 'Nova', repo: '/r/s' });
+    const orig = tmux.newSession.bind(tmux);
+    let release!: () => void;
+    tmux.newSession = async (...a: Parameters<typeof orig>) => { await new Promise<void>(res => { release = res; }); return orig(...a); };
+    const swap = r.swapSeat('reviewer', 'claude');
+    await new Promise(res => setTimeout(res, 20));
+    await expect(r.restart('reviewer')).rejects.toThrow('a swap is already running');
+    await expect(r.stop('advisor')).rejects.toThrow('a swap is already running');
+    tmux.newSession = orig;
+    await r.stop(w.id);
+    release();
+    await swap;
+  });
+});
+

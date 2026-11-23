@@ -162,6 +162,18 @@ agent-console install-launcher   # Linux: add "Agent Console" to the app menu
 - **Codex advisor:** it runs without a sandbox. The guard still applies to it.
 - **Rules:** the Codex advisor gets the advisor rules through `developer_instructions`.
 
+## Reviewer
+
+- **Off by default:** the reviewer is a second advisor seat. Add it in the advisor `⋯` menu ("Add Reviewer…"). The API call is `POST /api/reviewer {"agent":"codex"}`. Remove it with `POST /api/reviewer/remove`.
+- **Link:** the reviewer has one link, to the lead. It has no link to a worker.
+- **Tools:** the reviewer has `list_workers`, `read_worker` and `advise`. It has no tool that changes a worker or a link.
+- **Read access:** the reviewer can read any box with `read_worker`, also the lead, for context. It still cannot change anything.
+- **Second opinion:** the lead calls `ask_second_opinion`. The reviewer answers with `advise`, and the answer arrives at the lead as `[from Reviewer] …`.
+- **Direct message:** type `@reviewer text` to write to the reviewer. Plain text goes to the lead.
+- **Swap Roles:** this menu item swaps the agents of the two seats. Each seat resumes its own session. The API call is `POST /api/reviewer/swap-roles`.
+- **Limit:** the read-only rule is a cooperative rule. The console tool checks enforce it. It is not a security boundary.
+- **Why:** all sessions run as the same operating system user, and Codex runs without a sandbox. Each session can read the console token file. A hostile agent can bypass the rule.
+
 ## Config
 
 `~/.config/agent-console/config.json` (all keys are optional):

@@ -4,15 +4,20 @@ import { listRepos } from './repos';
 import { lastMessages, transcriptPath } from './external';
 import { resolveName } from './slug';
 import type { Tmux } from './tmux';
-import type { Worker } from './types';
+import type { Role, Worker } from './types';
 import { sessionName, type Registry } from './workers';
 
 export type ToolResult = { ok: true; result: unknown } | { ok: false; error: string };
 
-export const ADVISOR_TOOLS = ['list_workers', 'read_worker', 'send_to_worker', 'spawn_worker', 'stop_worker',
-  'interrupt_worker', 'connect', 'disconnect', 'ask_user'] as const;
-export const WORKER_TOOLS = ['send_message', 'list_connections'] as const;
+/** The one table of tools for each role. Every call is checked against it first. */
+export const TOOLS_BY_ROLE: Record<Role, readonly string[]> = {
+  advisor: ['list_workers', 'read_worker', 'send_to_worker', 'spawn_worker', 'stop_worker',
+    'interrupt_worker', 'connect', 'disconnect', 'ask_user', 'ask_second_opinion'],
+  reviewer: ['list_workers', 'read_worker', 'advise'],
+  worker: ['send_message', 'list_connections'],
+};
 
+const CUT_LINK = 'The user cut the link between the advisor and the reviewer.';
 const ASK_USER_MS = 30 * 60 * 1000;
 const ok = (result: unknown): ToolResult => ({ ok: true, result });
 const err = (error: string): ToolResult => ({ ok: false, error });
@@ -27,8 +32,10 @@ export async function handleTool(
   const caller = reg.get(body.caller);
   if (!caller) return err(`unknown caller ${body.caller}`);
   const a = body.args ?? {};
-  const isAdvisorTool = (ADVISOR_TOOLS as readonly string[]).includes(body.tool);
-  if (isAdvisorTool && caller.role !== 'advisor') return err(`${body.tool} is for the advisor only`);
+  if (!TOOLS_BY_ROLE[caller.role].includes(body.tool)) {
+    const known = Object.values(TOOLS_BY_ROLE).some(t => t.includes(body.tool));
+    return err(known ? `${body.tool} is not allowed for the ${caller.role}` : `unknown tool ${body.tool}`);
+  }
   const find = (q: unknown): Worker | undefined => resolveName(String(q ?? ''), reg.workers());
 
   try {
@@ -49,6 +56,8 @@ export async function handleTool(
       }
       case 'send_to_worker': {
         const w = find(a.id); if (!w) return err(`no worker ${a.id}`);
+        if (w.role === 'advisor') return err('The advisor is not a worker.');
+        if (w.role === 'reviewer') return err('The reviewer is not a worker. Use ask_second_opinion.');
         if (w.kind === 'linked')
           return err(`${w.name} is a linked session outside the console. Use your SendMessage tool with to: "${w.name}" to message it.`);
         if (!reg.linked('advisor', w.id) && !reg.connect('advisor', w.id, 'advisor'))
@@ -73,6 +82,9 @@ export async function handleTool(
       case 'interrupt_worker': { const w = find(a.id); if (!w) return err(`no worker ${a.id}`); await reg.interrupt(w.id); return ok('interrupted'); }
       case 'connect': {
         const x = find(a.a), y = find(a.b); if (!x || !y) return err('unknown worker');
+        // The reviewer links only to the advisor: tell this refusal apart from a cut by the user.
+        if ((x.role === 'reviewer' && y.role !== 'advisor') || (y.role === 'reviewer' && x.role !== 'advisor'))
+          return err('the reviewer links only to the advisor');
         return reg.connect(x.id, y.id, 'advisor') ? ok('connected') : err(`${x.name} ↔ ${y.name} was cut by the user`);
       }
       case 'disconnect': {
@@ -83,6 +95,24 @@ export async function handleTool(
         const n = reg.addNeed({ id: caller.id, kind: 'question', text: String(a.question ?? '') });
         const r = await reg.waitNeed(n.nid, ASK_USER_MS);
         return ok(r.decision === 'answer' ? r.text ?? '' : r.decision === 'timeout' ? '(no answer)' : `(${r.decision})`);
+      }
+      case 'advise': {
+        const text = String(a.text ?? '');
+        const lead = reg.workers().find(w => w.role === 'advisor');
+        if (!lead) return err('There is no advisor.');
+        if (!reg.linked(lead.id, caller.id)) return err(CUT_LINK);
+        const r = await reg.deliver(caller.id, lead.id, text);
+        reg.activity(`${caller.name} → ${reg.nameOf('advisor')}: ${text.slice(0, 80)}${r === 'queued' ? ' (queued)' : ''}`);
+        return ok(r);
+      }
+      case 'ask_second_opinion': {
+        const rv = reg.reviewer();
+        if (!rv) return err('No reviewer. The user can add one in the advisor menu.');
+        if (!reg.linked(caller.id, rv.id)) return err(CUT_LINK);
+        const text = String(a.text ?? '');
+        const r = await reg.deliver(caller.id, rv.id, text);
+        reg.activity(`${caller.name} → ${rv.name}: ${text.slice(0, 80)}${r === 'queued' ? ' (queued)' : ''}`);
+        return ok(r === 'queued' ? 'asked (queued)' : 'asked');
       }
       case 'send_message': {
         const to = find(a.to); if (!to) return err(`no worker ${a.to}`);

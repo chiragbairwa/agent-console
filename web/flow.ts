@@ -93,6 +93,10 @@ export class Flow {
 
   private workerHTML(w: Worker): string {
     const t = this.src.steps(w.id), now = Date.now();
+    if (w.role === 'reviewer') {
+      return `<div class="f-empty"><b>${esc(w.task || 'Reviewer')}</b>
+        <span>Reviewer: gives advice to the advisor when asked.</span></div>`;
+    }
     if (!t?.steps.length) {
       return `<div class="f-empty"><b>${esc(w.task || 'No steps yet')}</b>
         <span>Steps show here when the agent writes its checklist, or when you send it a prompt.</span></div>`;
@@ -120,7 +124,7 @@ export class Flow {
 
   // ---------- KPI strip ----------
   private kpiData() {
-    const ws = this.src.workers().filter(w => w.role !== 'advisor');
+    const ws = this.src.workers().filter(w => w.role === 'worker');
     const now = Date.now();
     let done = 0, total = 0, longest: { w: Worker; s: Step; ms: number } | null = null;
     for (const w of ws) {
@@ -184,7 +188,7 @@ export class Flow {
   }
 
   private kpiCard(key: string): string {
-    const ws = this.src.workers().filter(w => w.role !== 'advisor');
+    const ws = this.src.workers().filter(w => w.role === 'worker');
     if (key === 'needs') {
       const n = this.src.needs().filter(x => x.kind !== 'waiting');
       const name = (id: string) => ws.find(w => w.id === id)?.name ?? id;

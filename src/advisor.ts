@@ -18,7 +18,16 @@ export const advisorPrompt = (agentIds: string[]): string => `You are the ADVISO
 /** The rules, built one time at module load. */
 export const ADVISOR_PROMPT = advisorPrompt(Object.keys(ADAPTERS));
 
-/** Start (or restart) the advisor, and link it to every worker whose link the user did not cut. */
+/** The reviewer rules. The reviewer reads and advises the lead only. Built one time at module load. */
+export const REVIEWER_PROMPT = `You are the REVIEWER in Agent Console. Rules:
+- You are the second pair of eyes for the lead advisor. The lead advisor talks to the user.
+- You only read. Use list_workers and read_worker to see what the workers do.
+- Give advice to the lead advisor with advise. Never give orders to workers.
+- Keep each piece of advice short and concrete: what you see, what is risky, what to do.
+- When you agree with the lead advisor, say so.
+- Do not edit code. You must never approve guarded actions (git push, deploys, pipeline runs, gate approvals).`;
+
+/** Start (or restart) the advisor and a stopped reviewer, and link the advisor to every worker whose link the user did not cut. */
 export async function ensureAdvisor(reg: Registry, cfg: Config): Promise<void> {
   const adv = reg.get('advisor');
   let agent = cfg.advisorAgent;
@@ -32,4 +41,11 @@ export async function ensureAdvisor(reg: Registry, cfg: Config): Promise<void> {
   if (!adv) await reg.spawn({ name: 'Advisor', repo: cfg.advisorCwd, role: 'advisor', agent });
   else if (adv.status === 'stopped') await reg.restart('advisor', true);
   for (const w of reg.workers()) if (w.role === 'worker' && !reg.linked('advisor', w.id)) reg.connect('advisor', w.id, 'advisor');
+  // A reviewer is never created here. A stopped one restarts with its own agent, and keeps its one link to the lead.
+  // A failure here must not stop the work above, so it becomes an activity line.
+  try {
+    if (reg.reviewer()?.status === 'stopped') await reg.restart(reg.reviewer()!.id, true);
+    const rv = reg.reviewer();
+    if (rv && !reg.linked('advisor', rv.id)) reg.connect('advisor', rv.id, 'advisor');
+  } catch (e) { reg.activity(`Reviewer did not restart: ${(e as Error).message}`); }
 }

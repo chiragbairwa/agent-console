@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ADVISOR_PROMPT, advisorPrompt, ensureAdvisor } from '../src/advisor';
+import { ADVISOR_PROMPT, REVIEWER_PROMPT, advisorPrompt, ensureAdvisor } from '../src/advisor';
 import { ADAPTERS } from '../src/agents';
 import { loadConfig } from '../src/store';
 import { Registry } from '../src/workers';
@@ -70,5 +70,70 @@ describe('ensureAdvisor', () => {
     const cmd = tmux.of('newSession').at(-1)!.args[3] as string[];
     expect(cmd[0]).toBe('codex');
     expect(cmd.slice(cmd.indexOf('resume'))).toContain('cx-9');
+  });
+});
+
+describe('ensureAdvisor and the reviewer', () => {
+  const rmk = (cfg = loadConfig()) => new Registry(tmux.asTmux(), cfg, { bin: ['/b'], url: 'u', token: 't', inheritedOtelAttrs: '', advisorPrompt: ADVISOR_PROMPT, reviewerPrompt: REVIEWER_PROMPT });
+
+  test('REVIEWER_PROMPT: read-only, advises the lead, no orders', () => {
+    expect(REVIEWER_PROMPT).toContain('REVIEWER');
+    expect(REVIEWER_PROMPT).toContain('list_workers');
+    expect(REVIEWER_PROMPT).toContain('read_worker');
+    expect(REVIEWER_PROMPT).toContain('advise');
+    expect(REVIEWER_PROMPT).not.toContain('send_to_worker');
+  });
+
+  test('does not create a reviewer when none exists', async () => {
+    const cfg = loadConfig();
+    const r = rmk(cfg);
+    await ensureAdvisor(r, cfg);
+    expect(r.get('reviewer')).toBeUndefined();
+  });
+
+  test('restarts a stopped reviewer with its own agent and resume, and restores its link', async () => {
+    const cfg = { ...loadConfig(), advisorAgent: 'claude' };
+    const r = rmk(cfg);
+    await ensureAdvisor(r, cfg);
+    await r.addReviewer('codex');
+    r.update('reviewer', { sessionId: 'cx-7' });
+    await r.stop('reviewer');
+    // The link is missing, and the user did not cut it.
+    (r as any).state.links = (r as any).state.links.filter((l: any) => l.a !== 'reviewer' && l.b !== 'reviewer');
+    expect(r.linked('advisor', 'reviewer')).toBe(false);
+    await ensureAdvisor(r, cfg);
+    const cmd = tmux.of('newSession').at(-1)!.args[3] as string[];
+    expect(cmd[0]).toBe('codex');
+    expect(cmd.slice(cmd.indexOf('resume'))).toContain('cx-7');
+    expect(r.get('reviewer')!.status).not.toBe('stopped');
+    expect(r.linked('advisor', 'reviewer')).toBe(true);
+  });
+
+  test('the link is restored when it is missing, and the reviewer never links to a worker', async () => {
+    const cfg = loadConfig();
+    const r = rmk(cfg);
+    await ensureAdvisor(r, cfg);
+    await r.addReviewer('claude');
+    const w = await r.spawn({ name: 'Nova', repo: '/r/b' });
+    (r as any).state.links = (r as any).state.links.filter((l: any) => l.a !== 'reviewer' && l.b !== 'reviewer');
+    expect(r.linked('advisor', 'reviewer')).toBe(false);
+    await ensureAdvisor(r, cfg);
+    expect(r.linked('advisor', 'reviewer')).toBe(true);
+    expect(r.linked('reviewer', w.id)).toBe(false);
+  });
+
+  test('a failing reviewer restart does not block the advisor-worker links', async () => {
+    const cfg = loadConfig();
+    const r = rmk(cfg);
+    await ensureAdvisor(r, cfg);
+    ADAPTERS.stub = { ...ADAPTERS.codex!, id: 'stub', label: 'Stub' };
+    await r.addReviewer('stub');
+    const w = await r.spawn({ name: 'Nova', repo: '/r/b' });
+    await r.stop('reviewer');
+    (r as any).state.links = (r as any).state.links.filter((l: any) => l.b !== w.id && l.a !== w.id);
+    delete ADAPTERS.stub;
+    await ensureAdvisor(r, cfg);
+    expect(r.linked('advisor', w.id)).toBe(true);
+    expect(r.snapshot().state.activity.some(a => a.text.startsWith('Reviewer did not restart: '))).toBe(true);
   });
 });

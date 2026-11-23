@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { handleTool } from '../src/tools';
+import { handleTool, TOOLS_BY_ROLE } from '../src/tools';
 import { ensureAdvisor, ADVISOR_PROMPT } from '../src/advisor';
 import { Registry, linkKey } from '../src/workers';
 import { loadConfig } from '../src/store';
@@ -180,5 +180,102 @@ describe('agents in tools', () => {
     const items = (r as any).result as { id: string; agent: string }[];
     expect(items.find(w => w.id === 'nova')!.agent).toBe('claude');
     expect(items.find(w => w.id === 'cx')!.agent).toBe('codex');
+  });
+});
+
+describe('reviewer role', () => {
+  // Every tool of every role that the reviewer does not have.
+  const FORBIDDEN = [...new Set(Object.values(TOOLS_BY_ROLE).flat())].filter(t => !TOOLS_BY_ROLE.reviewer.includes(t));
+
+  test('the reviewer is refused every worker-changing tool', async () => {
+    await reg.addReviewer('claude');
+    for (const tool of FORBIDDEN) {
+      const r = await call('reviewer', tool, { id: 'nova', a: 'nova', b: 'web-app', text: 'x', question: 'q', name: 'n', repo: root });
+      expect(r).toEqual({ ok: false, error: `${tool} is not allowed for the reviewer` });
+    }
+    expect(reg.linked('reviewer', 'nova')).toBe(false);
+  });
+
+  test('the reviewer can list and read workers, and the lists hide the lead and the reviewer', async () => {
+    await reg.addReviewer('claude');
+    const r = await call('reviewer', 'list_workers');
+    expect((r as { result: any[] }).result.map(w => w.id)).toEqual(['nova', 'web-app']);
+    expect((await call('reviewer', 'read_worker', { id: 'nova' })).ok).toBe(true);
+  });
+
+  test('the lead connect tool refuses a reviewer-worker pair with the right reason', async () => {
+    await reg.addReviewer('claude');
+    expect(await call('advisor', 'connect', { a: 'reviewer', b: 'nova' }))
+      .toEqual({ ok: false, error: 'the reviewer links only to the advisor' });
+    expect(await call('advisor', 'connect', { a: 'nova', b: 'reviewer' }))
+      .toEqual({ ok: false, error: 'the reviewer links only to the advisor' });
+    expect(reg.linked('reviewer', 'nova')).toBe(false);
+  });
+
+  test('send_to_worker refuses the reviewer and the lead as targets', async () => {
+    await reg.addReviewer('claude');
+    expect((await call('advisor', 'send_to_worker', { id: 'reviewer', text: 'x' })).ok).toBe(false);
+    expect((await call('advisor', 'send_to_worker', { id: 'advisor', text: 'x' })).ok).toBe(false);
+    expect(tmux.of('sendText').some(c => String(c.args[1]).includes('x'))).toBe(false);
+  });
+
+  test('advise delivers to the lead with the prefix and logs activity', async () => {
+    await reg.addReviewer('claude');
+    const r = await call('reviewer', 'advise', { text: 'check the tests' });
+    expect(r).toEqual({ ok: true, result: 'sent' });
+    expect(JSON.stringify(tmux.of('sendText'))).toContain('[from Reviewer] check the tests');
+    expect(JSON.stringify(events)).toContain('Reviewer → Advisor: check the tests');
+  });
+
+  test('advise is for the reviewer only', async () => {
+    expect((await call('nova', 'advise', { text: 'x' })).ok).toBe(false);
+    expect(((await call('advisor', 'advise', { text: 'x' })) as { error: string }).error).toBe('advise is not allowed for the advisor');
+  });
+
+  test('ask_second_opinion delivers to the reviewer', async () => {
+    await reg.addReviewer('claude');
+    const r = await call('advisor', 'ask_second_opinion', { text: 'is this safe?' });
+    expect(r).toEqual({ ok: true, result: 'asked' });
+    expect(JSON.stringify(tmux.of('sendText'))).toContain('[from Advisor] is this safe?');
+    expect(JSON.stringify(events)).toContain('Advisor → Reviewer: is this safe?');
+  });
+
+  test('ask_second_opinion without a reviewer is an error', async () => {
+    const r = await call('advisor', 'ask_second_opinion', { text: 'x' });
+    expect(r).toEqual({ ok: false, error: 'No reviewer. The user can add one in the advisor menu.' });
+  });
+
+  test('send_to_worker hint depends on the target role', async () => {
+    await reg.addReviewer('claude');
+    expect(await call('advisor', 'send_to_worker', { id: 'advisor', text: 'x' })).toEqual({ ok: false, error: 'The advisor is not a worker.' });
+    expect(await call('advisor', 'send_to_worker', { id: 'reviewer', text: 'x' }))
+      .toEqual({ ok: false, error: 'The reviewer is not a worker. Use ask_second_opinion.' });
+  });
+
+  test('ask_second_opinion returns asked (queued) when the reviewer is busy', async () => {
+    await reg.addReviewer('claude');
+    reg.toolStart('reviewer');
+    expect(await call('advisor', 'ask_second_opinion', { text: 'later' })).toEqual({ ok: true, result: 'asked (queued)' });
+  });
+
+  test('a cut lead-reviewer link stops advise and ask_second_opinion', async () => {
+    await reg.addReviewer('claude');
+    reg.cut('advisor', 'reviewer');
+    const msg = 'The user cut the link between the advisor and the reviewer.';
+    expect(await call('reviewer', 'advise', { text: 'x' })).toEqual({ ok: false, error: msg });
+    expect(await call('advisor', 'ask_second_opinion', { text: 'x' })).toEqual({ ok: false, error: msg });
+    expect(tmux.of('sendText').length).toBe(0);
+  });
+
+  test('a worker named Reviewer does not block the seat tools', async () => {
+    await reg.spawn({ name: 'Reviewer', repo: '/r/x' });
+    expect(await call('advisor', 'ask_second_opinion', { text: 'x' })).toMatchObject({ ok: false });
+    await reg.addReviewer('claude');
+    expect(await call('advisor', 'ask_second_opinion', { text: 'x' })).toEqual({ ok: true, result: 'asked' });
+    expect(tmux.of('sendText').at(-1)!.args[0]).toBe('ac-reviewer');
+  });
+
+  test('a worker cannot use ask_second_opinion', async () => {
+    expect(((await call('nova', 'ask_second_opinion', { text: 'x' })) as { error: string }).error).toBe('ask_second_opinion is not allowed for the worker');
   });
 });

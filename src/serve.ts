@@ -2,7 +2,7 @@ import { loadConfig, getToken } from './store';
 import { Registry } from './workers';
 import { Tmux } from './tmux';
 import { startServer } from './server';
-import { ADVISOR_PROMPT, ensureAdvisor } from './advisor';
+import { ADVISOR_PROMPT, REVIEWER_PROMPT, ensureAdvisor } from './advisor';
 import { Digest } from './digest';
 import { uiCommand } from './appwindow';
 import { withUserBins } from './paths';
@@ -21,7 +21,7 @@ export async function serve(args: string[]): Promise<number> {
   const token = getToken();
   const tmux = new Tmux(process.env.AC_TMUX_SOCKET ?? 'agent-console');
   const url = `http://127.0.0.1:${port}`;
-  const reg = new Registry(tmux, cfg, { bin: selfCommand(), url, token, advisorPrompt: ADVISOR_PROMPT });
+  const reg = new Registry(tmux, cfg, { bin: selfCommand(), url, token, advisorPrompt: ADVISOR_PROMPT, reviewerPrompt: REVIEWER_PROMPT });
   await reg.discover();
   await tmux.configure(); // sessions from before a restart get the current options too
   const server = startServer({ reg, cfg, token, port, tmux });

@@ -350,3 +350,109 @@ describe('POST /api/advisor', () => {
     expect((await post({ agent: 'codex' })).status).toBe(404);
   });
 });
+
+describe('reviewer routes', () => {
+  const post = (path: string, body: unknown = {}) => fetch(`${base}${path}`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const addLead = () => reg.spawn({ name: 'Advisor', repo: join(root, 'RepoA'), role: 'advisor' });
+
+  test('POST /api/reviewer: no advisor → 404; bad agent → 400; ok → 200; second → 400', async () => {
+    expect((await post('/api/reviewer', { agent: 'codex' })).status).toBe(404);
+    await addLead();
+    expect((await post('/api/reviewer', { agent: 5 })).status).toBe(400);
+    expect((await post('/api/reviewer', { agent: 'nope' })).status).toBe(400);
+    const ok = await post('/api/reviewer', { agent: 'codex' });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toMatchObject({ id: 'reviewer', role: 'reviewer', agent: 'codex' });
+    expect((await post('/api/reviewer', { agent: 'claude' })).status).toBe(400);
+  });
+
+  test('POST /api/reviewer/remove: none → 404; ok → 200', async () => {
+    await addLead();
+    expect((await post('/api/reviewer/remove')).status).toBe(404);
+    await post('/api/reviewer', { agent: 'codex' });
+    expect((await post('/api/reviewer/remove')).status).toBe(200);
+    expect(reg.get('reviewer')).toBeUndefined();
+  });
+
+  test('POST /api/reviewer/swap-roles: none → 404; ok → 200 { advisor, reviewer }; busy → 400', async () => {
+    await addLead();
+    expect((await post('/api/reviewer/swap-roles')).status).toBe(404);
+    await post('/api/reviewer', { agent: 'codex' });
+    const r = await post('/api/reviewer/swap-roles');
+    expect(r.status).toBe(200);
+    const j = await r.json() as { advisor: { agent: string }; reviewer: { agent: string } };
+    expect(j.advisor.agent).toBe('codex');
+    expect(j.reviewer.agent).toBe('claude');
+    const orig = tmux.newSession.bind(tmux);
+    let release!: () => void;
+    tmux.newSession = async (...a: Parameters<typeof orig>) => { await new Promise<void>(res => { release = res; }); return orig(...a); };
+    const first = post('/api/reviewer/swap-roles');
+    await new Promise(res => setTimeout(res, 50));
+    const second = await post('/api/reviewer/swap-roles');
+    expect(second.status).toBe(400);
+    expect(await second.json()).toEqual({ error: 'a swap is already running' });
+    release();
+    await new Promise(res => setTimeout(res, 20));
+    release();
+    expect((await first).status).toBe(200);
+  });
+
+  test('POST /api/links reviewer–worker → 409; reviewer–advisor still 200', async () => {
+    await addLead();
+    await post('/api/reviewer', { agent: 'codex' });
+    const r = await post('/api/links', { a: 'reviewer', b: 'nova' });
+    expect(r.status).toBe(409);
+    expect(await r.json()).toEqual({ error: 'the reviewer links only to the advisor' });
+    expect(reg.linked('reviewer', 'nova')).toBe(false);
+    expect((await post('/api/links', { a: 'reviewer', b: 'advisor' })).status).toBe(200);
+    expect((await post('/api/links', { a: 'nova', b: 'advisor' })).status).toBe(200);
+  });
+
+  test('POST /api/workers ignores body.role: workers only', async () => {
+    const r = await post('/api/workers', { name: 'Sneaky', repo: join(root, 'RepoA'), role: 'reviewer' });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ role: 'worker', id: 'sneaky' });
+    expect(reg.reviewer()).toBeUndefined();
+  });
+
+  test('POST /api/tool: the reviewer cannot call send_to_worker', async () => {
+    await addLead();
+    await post('/api/reviewer', { agent: 'codex' });
+    const r = await post('/api/tool', { caller: 'reviewer', tool: 'send_to_worker', args: { id: 'nova', text: 'x' } });
+    expect(await r.json()).toEqual({ ok: false, error: 'send_to_worker is not allowed for the reviewer' });
+  });
+
+  test('restart and stop of a seat during a swap → 409', async () => {
+    await addLead();
+    await post('/api/reviewer', { agent: 'codex' });
+    const orig = tmux.newSession.bind(tmux);
+    let release!: () => void;
+    tmux.newSession = async (...a: Parameters<typeof orig>) => { await new Promise<void>(res => { release = res; }); return orig(...a); };
+    const swap = reg.swapSeat('reviewer', 'claude');
+    await new Promise(res => setTimeout(res, 20));
+    for (const act of ['restart', 'stop']) {
+      const r = await post(`/api/workers/reviewer/${act}`);
+      expect(r.status).toBe(409);
+      expect(await r.json()).toEqual({ error: 'a swap is already running' });
+    }
+    release();
+    await swap;
+  });
+
+  test('POST /api/workers/reviewer/remove during a reviewer swap → 409; the worker stays', async () => {
+    await addLead();
+    await post('/api/reviewer', { agent: 'codex' });
+    const orig = tmux.newSession.bind(tmux);
+    let release!: () => void;
+    tmux.newSession = async (...a: Parameters<typeof orig>) => { await new Promise<void>(res => { release = res; }); return orig(...a); };
+    const swap = reg.swapSeat('reviewer', 'claude');
+    await new Promise(res => setTimeout(res, 20));
+    const r = await post('/api/workers/reviewer/remove');
+    expect(r.status).toBe(409);
+    expect(await r.json()).toEqual({ error: 'a swap is already running' });
+    release();
+    await swap;
+    expect(reg.get('reviewer')).toBeDefined();
+    expect([...tmux.sessions].filter(n => n === 'ac-reviewer').length).toBe(1);
+  });
+});

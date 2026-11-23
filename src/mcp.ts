@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { z } from 'zod';
+import type { Role } from './types';
 
 type Env = Record<string, string | undefined>;
 
@@ -15,6 +16,7 @@ const ADVISOR_SPECS: Record<string, { description: string; input: z.ZodRawShape 
   connect: { description: 'Let two workers message each other.', input: { a: z.string(), b: z.string() } },
   disconnect: { description: 'Remove the link between two sessions.', input: { a: z.string(), b: z.string() } },
   ask_user: { description: 'Ask the user a question in the console and wait for the answer.', input: { question: z.string() } },
+  ask_second_opinion: { description: 'Ask the reviewer for a second opinion. The answer comes later as a message from the reviewer.', input: { text: z.string() } },
 };
 
 const WORKER_SPECS: typeof ADVISOR_SPECS = {
@@ -22,13 +24,21 @@ const WORKER_SPECS: typeof ADVISOR_SPECS = {
   list_connections: { description: 'List the sessions you may message.', input: {} },
 };
 
+const REVIEWER_SPECS: typeof ADVISOR_SPECS = {
+  list_workers: ADVISOR_SPECS.list_workers!,
+  read_worker: ADVISOR_SPECS.read_worker!,
+  advise: { description: 'Send advice to the lead advisor. You cannot give orders to workers.', input: { text: z.string() } },
+};
+
+const SPECS_BY_ROLE: Record<Role, typeof ADVISOR_SPECS> = { advisor: ADVISOR_SPECS, reviewer: REVIEWER_SPECS, worker: WORKER_SPECS };
+
 export type ToolReply = { ok: boolean; result?: unknown; error?: string };
 export type CallTool = (tool: string, args: unknown) => Promise<ToolReply>;
 
 /** The MCP server for one role. `call` runs a tool: in-process (HTTP) or through the API (stdio). */
-export function buildMcpServer(role: 'advisor' | 'worker', call: CallTool): McpServer {
+export function buildMcpServer(role: Role, call: CallTool): McpServer {
   const server = new McpServer({ name: 'agent-console', version: '0.3.0' });
-  const specs = role === 'advisor' ? ADVISOR_SPECS : WORKER_SPECS;
+  const specs = SPECS_BY_ROLE[role];
   for (const [tool, spec] of Object.entries(specs)) {
     server.registerTool(tool, { description: spec.description, inputSchema: spec.input }, async (args: unknown) => {
       try {
@@ -49,7 +59,7 @@ export function buildMcpServer(role: 'advisor' | 'worker', call: CallTool): McpS
  * The caller is the `x-ac-id` header; the token was checked before this runs.
  */
 export async function handleMcpHttp(
-  req: Request, role: 'advisor' | 'worker' | undefined, call: CallTool,
+  req: Request, role: Role | undefined, call: CallTool,
 ): Promise<Response> {
   if (!role) return Response.json({ error: 'unknown session (x-ac-id)' }, { status: 404 });
   const server = buildMcpServer(role, call);
@@ -61,7 +71,7 @@ export async function handleMcpHttp(
 
 /** The old stdio helper (`agent-console mcp`). Sessions started before HTTP MCP still use it. */
 export async function runMcp(env: Env): Promise<void> {
-  const role = env.AC_ROLE === 'advisor' ? 'advisor' : 'worker';
+  const role: Role = env.AC_ROLE === 'advisor' || env.AC_ROLE === 'reviewer' ? env.AC_ROLE : 'worker';
   const server = buildMcpServer(role, async (tool, args) => {
     const res = await fetch(`${env.AC_URL}/api/tool`, {
       method: 'POST',

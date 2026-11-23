@@ -85,7 +85,9 @@ export function startServer(o: ServerOpts): Server<WsData> {
       }
       case 'POST /api/links': {
         if (!reg.get(body.a) || !reg.get(body.b)) return json({ error: 'unknown worker' }, 404);
-        if (body.op === 'cut') reg.cut(body.a, body.b); else reg.connect(body.a, body.b, 'you');
+        if (body.op === 'cut') reg.cut(body.a, body.b);
+        else if (!reg.connect(body.a, body.b, 'you') && (reg.get(body.a)?.role === 'reviewer' || reg.get(body.b)?.role === 'reviewer'))
+          return json({ error: 'the reviewer links only to the advisor' }, 409);
         return json({ ok: true });
       }
       case 'POST /api/needs': {
@@ -96,6 +98,20 @@ export function startServer(o: ServerOpts): Server<WsData> {
         if (!reg.get('advisor')) return json({ error: 'no advisor' }, 404);
         if (typeof body.agent !== 'string') return json({ error: 'agent must be a string' }, 400);
         try { return json(await reg.swapAdvisor(body.agent)); } catch (e) { return json({ error: (e as Error).message }, 400); }
+      }
+      case 'POST /api/reviewer': {
+        const action = parts[2];
+        if (action === undefined) {
+          if (!reg.get('advisor')) return json({ error: 'no advisor' }, 404);
+          if (typeof body.agent !== 'string') return json({ error: 'agent must be a string' }, 400);
+          try { return json(await reg.addReviewer(body.agent)); } catch (e) { return json({ error: (e as Error).message }, 400); }
+        }
+        if (action !== 'remove' && action !== 'swap-roles') return json({ error: 'not found' }, 404);
+        if (!reg.reviewer()) return json({ error: 'no reviewer' }, 404);
+        try {
+          if (action === 'remove') { await reg.removeReviewer(); return json({ ok: true }); }
+          return json(await reg.swapRoles());
+        } catch (e) { return json({ error: (e as Error).message }, 400); }
       }
       case 'GET /api/external': return json({ sessions: reg.externalSessions() });
       case 'POST /api/external': {
@@ -120,7 +136,8 @@ export function startServer(o: ServerOpts): Server<WsData> {
           let v: ReturnType<typeof validateAgent>;
           try { v = validateAgent(body.agent ?? cfg.defaultWorkerAgent, body.options); }
           catch (e) { return json({ error: (e as Error).message }, 400); }
-          try { return json(await reg.spawn({ ...body, agent: v.agent, options: v.options })); } catch (e) { return json({ error: (e as Error).message }, 500); }
+          // Workers only. A seat comes from ensureAdvisor or addReviewer, never from this route.
+          try { return json(await reg.spawn({ ...body, role: 'worker', agent: v.agent, options: v.options })); } catch (e) { return json({ error: (e as Error).message }, 500); }
         }
         const id = parts[2]!; const action = parts[3];
         const w = reg.get(id);
@@ -133,9 +150,12 @@ export function startServer(o: ServerOpts): Server<WsData> {
             reg.resize(id, body.w, body.h); break;
           }
           case 'interrupt': await reg.interrupt(id); break;
-          case 'stop': await reg.stop(id); break;
-          case 'restart': await reg.restart(id, body.resume !== false); break;
-          case 'remove': if (w.kind === 'linked') reg.unlink(id); else await reg.remove(id); break;
+          case 'stop': try { await reg.stop(id); } catch (e) { return json({ error: (e as Error).message }, 409); } break;
+          case 'restart': try { await reg.restart(id, body.resume !== false); } catch (e) { return json({ error: (e as Error).message }, 409); } break;
+          case 'remove':
+            if (w.kind === 'linked') reg.unlink(id);
+            else { try { await reg.remove(id); } catch (e) { return json({ error: (e as Error).message }, 409); } }
+            break;
           case 'open-editor': Bun.spawn(['code', w.cwd], { stdout: 'ignore', stderr: 'ignore' }); break;
           default: return json({ error: 'unknown action' }, 404);
         }
@@ -179,7 +199,8 @@ export function startServer(o: ServerOpts): Server<WsData> {
       if (url.pathname === '/mcp') {
         srv.timeout(req, 0); // ask_user may wait up to 30 minutes for the user
         const id = req.headers.get('x-ac-id') ?? '';
-        return handleMcpHttp(req, reg.get(id)?.role, (tool, args) => toolHandler(reg, tmux, { caller: id, tool, args }) as Promise<ToolReply>);
+        const role = reg.get(id)?.role;
+        return handleMcpHttp(req, role, (tool, args) => toolHandler(reg, tmux, { caller: id, tool, args }) as Promise<ToolReply>);
       }
       return json({ error: 'not found' }, 404);
     },

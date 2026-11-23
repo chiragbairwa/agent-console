@@ -107,6 +107,8 @@ describe('sessionFiles', () => {
     const a = sessionFiles(worker({ id: 'advisor', role: 'advisor' }), loadConfig(), { ...base, advisorPrompt: 'ROLE' });
     expect(a.args).toContain('--append-system-prompt');
     expect(a.args[a.args.indexOf('--append-system-prompt') + 1]).toBe('ROLE');
+    const r = sessionFiles(worker({ id: 'reviewer', role: 'reviewer' }), loadConfig(), { ...base, advisorPrompt: 'REV' });
+    expect(r.args[r.args.indexOf('--append-system-prompt') + 1]).toBe('REV');
   });
 
   test('resume uses the known session id, else --continue', () => {

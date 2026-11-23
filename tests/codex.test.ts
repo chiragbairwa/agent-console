@@ -69,9 +69,11 @@ test('launch: no resume without sessionId or without resume flag', () => {
   expect(codex.launch(input({ w: worker({ sessionId: 's' }) })).cmd).not.toContain('resume');
   expect(codex.launch(input({ resume: true })).cmd).not.toContain('--last');
 });
-test('launch: rules only for advisor', () => {
+test('launch: rules only for advisor and reviewer', () => {
   const adv = codex.launch(input({ w: worker({ role: 'advisor' }), rules: 'R"1' })).cmd;
   expect(adv).toContain(`developer_instructions=${JSON.stringify('R"1')}`);
+  const rev = codex.launch(input({ w: worker({ role: 'reviewer' }), rules: 'RV' })).cmd;
+  expect(rev).toContain(`developer_instructions=${JSON.stringify('RV')}`);
   const wk = codex.launch(input({ rules: 'R' })).cmd;
   expect(wk.some(a => a.startsWith('developer_instructions='))).toBe(false);
 });

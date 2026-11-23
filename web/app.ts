@@ -58,7 +58,7 @@ function nodeEl(w: Worker): HTMLElement {
   }
   if (d) return d;
   d = document.createElement('div');
-  d.className = 'node' + (w.role === 'advisor' ? ' adv' : '') + (kind === 'linked' ? ' linked' : '');
+  d.className = 'node' + (w.role === 'advisor' ? ' adv' : w.role === 'reviewer' ? ' rev' : '') + (kind === 'linked' ? ' linked' : '');
   d.dataset.id = w.id; d.dataset.kind = kind;
   const body = kind === 'linked'
     ? `<div class="linked-box"><div class="lk-tag">↗ Linked: runs in its own terminal tab. The advisor reaches it with SendMessage.</div>
@@ -462,19 +462,36 @@ function nodeMenu(id: string, btn: HTMLElement) {
     <button data-x="interrupt">Interrupt</button>
     ${w.status === 'stopped' ? '<button data-x="resume">Resume Last Session</button><button data-x="fresh">Start Fresh</button>' : '<button data-x="stop">Stop</button><button data-x="resume">Restart (Resume)</button>'}
     <button data-x="editor">Open in VS Code</button>
-    ${w.role === 'advisor' ? '' : '<button data-x="remove" class="danger">Remove Worker</button>'}`);
+    ${w.role === 'advisor' ? ([...workers.values()].some(x => x.role === 'reviewer') ? '<button data-x="swap">Swap Roles</button><button data-x="rmrev" class="danger">Remove Reviewer</button>' : '<button data-x="addrev">Add Reviewer…</button>')
+      : w.role === 'reviewer' ? '<button data-x="rmrev" class="danger">Remove Reviewer</button>'
+      : '<button data-x="remove" class="danger">Remove Worker</button>'}`);
   p.onclick = ev => {
-    const x = (ev.target as HTMLElement).dataset.x; if (!x) return;
-    if (x === 'remove' && !(ev.target as HTMLElement).dataset.sure) {
-      (ev.target as HTMLElement).dataset.sure = '1'; (ev.target as HTMLElement).textContent = 'Click Again to Remove'; return;
-    }
+    const t = ev.target as HTMLElement, x = t.dataset.x; if (!x) return;
+    // These items need a second click.
+    const sure = { remove: 'Click Again to Remove', rmrev: 'Click Again to Remove Reviewer', swap: 'Click Again to Swap Roles' }[x];
+    if (sure && !t.dataset.sure) { t.dataset.sure = '1'; t.textContent = sure; return; }
+    if (x === 'addrev') { addReviewerPop(r); return; }
     closePop();
+    if (x === 'rmrev') { void api('/api/reviewer/remove', {}); return; }
+    if (x === 'swap') { void api('/api/reviewer/swap-roles', {}); return; }
     if (x === 'focus') openFocus(id);
     else if (x === 'sel') clickNode(id, true);
     else if (x === 'resume') void api(`/api/workers/${id}/restart`, { resume: true });
     else if (x === 'fresh') void api(`/api/workers/${id}/restart`, { resume: false });
     else if (x === 'editor') void api(`/api/workers/${id}/open-editor`, {});
     else void api(`/api/workers/${id}/${x}`, {});
+  };
+}
+
+/** Show the adapters that can take the reviewer seat. A pick adds the reviewer. */
+function addReviewerPop(r: DOMRect) {
+  const opts = agents.filter(a => a.caps.advisor);
+  const p = popAt(r.left, r.bottom + 4, `<div class="cap">Reviewer Agent</div>${opts.map(a =>
+    `<button data-agent="${esc(a.id)}">${esc(a.icon)} ${esc(a.label)}</button>`).join('')}`);
+  p.onclick = ev => {
+    const t = (ev.target as HTMLElement).closest<HTMLElement>('button[data-agent]'); if (!t) return;
+    closePop();
+    void api('/api/reviewer', { agent: t.dataset.agent });
   };
 }
 
@@ -755,7 +772,7 @@ $('#bImport').onclick = () => void openImport();
 // ---------- toolbar + keys ----------
 $('#bFit').onclick = () => canvas.fit();
 $('#bLayout').onclick = () => {
-  const ws = [...workers.values()].filter(w => w.role !== 'advisor'), a = workers.get('advisor');
+  const ws = [...workers.values()].filter(w => w.role === 'worker'), a = workers.get('advisor');
   const ax = 1400, ay = 1000, R = 1150;
   if (a) void api('/api/workers/advisor/move', { x: ax - 380, y: ay - 300 });
   ws.forEach((w, i) => {
@@ -764,7 +781,7 @@ $('#bLayout').onclick = () => {
   });
   setTimeout(() => canvas.fit(), 300);
 };
-$('#bSelAll').onclick = () => { for (const w of workers.values()) if (w.role !== 'advisor') sel.add(w.id); renderAll(); };
+$('#bSelAll').onclick = () => { for (const w of workers.values()) if (w.role === 'worker') sel.add(w.id); renderAll(); };
 $('#bClear').onclick = () => { sel.clear(); renderAll(); };
 $('#zIn').onclick = () => canvas.zoomAt(1.15);
 $('#zOut').onclick = () => canvas.zoomAt(1 / 1.15);
