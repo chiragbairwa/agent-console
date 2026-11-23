@@ -15,6 +15,15 @@ bun run install-bin          # builds dist/agent-console and copies it to ~/.loc
 agent-console doctor         # checks tmux, claude, the config folder and the port
 ```
 
+## Download a release
+
+The [Releases](https://github.com/chiragbairwa/agent-console/releases) page has the files for each version. The release notes list each file.
+
+- **Debian or Ubuntu:** `sudo apt install ./agent-console_<version>_amd64.deb`. It installs the `agent-console` command and the desktop app.
+- **Other Linux:** download the `.AppImage`, run `chmod +x` on it, then start it. It has the CLI inside.
+- **macOS and Windows:** the desktop app, and the CLI as `agent-console-<os>-<arch>` archives.
+- Check a download with `sha256sum -c SHA256SUMS --ignore-missing`.
+
 ## Install on macOS
 
 > **Note:** Agent Console is not tested on macOS yet. If a step fails, send the output of `agent-console doctor` to the team.
@@ -75,15 +84,13 @@ agent-console doctor         # checks tmux, claude, the config folder and the po
 
 10. Add the console to your apps. `agent-console install-launcher` is for Linux only. On macOS, open the console in Chrome and use the Chrome menu: **Install Agent Console**.
 
-**Desktop app (optional):** build it on the Mac. Hutch must be installed (`npx electrobun` downloads it one time).
+**Desktop app (optional):** download it from the [latest release](https://github.com/chiragbairwa/agent-console/releases/latest), or build it on the Mac. The first command makes the app icon (`assets/icon.iconset`) with `sips`.
 
 ```bash
-cd desktop && hutch install && hutch run build
+cd desktop && sh scripts/mac-iconset.sh && npx -y electrobun@2.0.7 build --env=stable
 ```
 
 The build writes the app to `desktop/artifacts/`.
-
-**Known gap (macOS app icon):** `desktop/electrobun.config.ts` has no macOS icon. For macOS, Electrobun does not accept a PNG `icon`. It accepts `mac.icons`: the path to an `.iconset` folder or an `.icon` file. Electrobun converts an `.iconset` with `iconutil` on the Mac. Until an `.iconset` is added, the macOS app has no custom icon.
 
 ## Use
 
