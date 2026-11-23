@@ -64,7 +64,7 @@ export function sessionFiles(w: Worker, _cfg: Config, o: SessionOpts): SessionFi
   writeFileSync(mcpPath, JSON.stringify(mcp, null, 2), { mode: 0o600 });
 
   const args = ['--settings', settingsPath, '--mcp-config', mcpPath];
-  if (w.role === 'advisor' && o.advisorPrompt) args.push('--append-system-prompt', o.advisorPrompt);
+  if ((w.role === 'advisor' || w.role === 'reviewer') && o.advisorPrompt) args.push('--append-system-prompt', o.advisorPrompt);
   if (o.resume) args.push(...(w.sessionId ? ['--resume', w.sessionId] : ['--continue']));
   if (o.template?.permissionMode) args.push('--permission-mode', o.template.permissionMode);
   if (o.template?.prompt) args.push(o.template.prompt);

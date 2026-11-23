@@ -14,12 +14,13 @@ export const linkKey = (a: string, b: string) => [a, b].sort().join('~');
 export const sessionName = (id: string) => `ac-${id}`;
 const TYPING_QUIET_MS = 10_000;
 const SWAP_SETTLE_MS = 5000;
+const SEAT_IDS = ['advisor', 'reviewer'];
 
 export interface RegistryOpts {
   bin: string[]; url: string; token: string;
-  inheritedOtelAttrs?: string; advisorPrompt?: string;
+  inheritedOtelAttrs?: string; advisorPrompt?: string; reviewerPrompt?: string;
   now?: () => number;
-  /** How long the advisor stays busy after a swap, while the new TUI loads. Default 5000. */
+  /** How long a seat stays busy after a swap, while the new TUI loads. Default 5000. */
   swapSettleMs?: number;
   exec?: (cmd: string[], cwd: string) => Promise<void>;
   /** For linked sessions (spec §12). Defaults use /proc and ~/.claude/sessions. */
@@ -83,6 +84,10 @@ export class Registry extends EventTarget {
   config(): Config { return this.cfg; }
   workers(): Worker[] { return this.state.workers; }
   get(id: string): Worker | undefined { return this.state.workers.find(w => w.id === id); }
+  /** The reviewer seat. A worker with the id reviewer (old state) is not the seat. */
+  reviewer(): Worker | undefined { return this.state.workers.find(w => w.role === 'reviewer'); }
+  /** Ids that only a seat can take. A worker never gets one. */
+  private takenIds(): string[] { return [...this.state.workers.map(w => w.id), ...SEAT_IDS]; }
   needs(): Need[] { return [...this.needMap.values()]; }
   links(): Link[] { return this.state.links; }
   nameOf(id: string) { return this.get(id)?.name ?? id; }
@@ -106,12 +111,14 @@ export class Registry extends EventTarget {
   // ---------- lifecycle ----------
   /** Start the tmux session of a worker with its agent adapter. */
   private async start(w: Worker, extra: { resume?: boolean; template?: Template } = {}, adapter: AgentAdapter = adapterOf(w)) {
-    const { bin, url, token, inheritedOtelAttrs, advisorPrompt } = this.opts;
+    const { bin, url, token, inheritedOtelAttrs, advisorPrompt, reviewerPrompt } = this.opts;
+    // The rules text depends on the seat. A worker has none.
+    const seatPrompt = w.role === 'advisor' ? advisorPrompt : w.role === 'reviewer' ? reviewerPrompt : undefined;
     // Worker options win over the config of the agent. Only string values count.
     const fromCfg = Object.entries(this.cfg.agents?.[adapter.id] ?? {}).filter(([, v]) => typeof v === 'string');
     const l = adapter.launch({
       w, dir: sessionDir(w.id), url, token, bin, inheritedOtelAttrs,
-      rules: w.role === 'advisor' && advisorPrompt !== undefined ? (adapter.rules?.('advisor', advisorPrompt) ?? advisorPrompt) : undefined,
+      rules: (w.role === 'advisor' || w.role === 'reviewer') && seatPrompt !== undefined ? (adapter.rules?.(w.role, seatPrompt) ?? seatPrompt) : undefined,
       resume: extra.resume ?? false, template: extra.template,
       options: { ...Object.fromEntries(fromCfg), ...(w.options ?? {}) }, hookTimeoutSec: this.cfg.hookTimeoutSec,
     });
@@ -123,8 +130,13 @@ export class Registry extends EventTarget {
     // The default worker agent is for workers only. The advisor agent comes from the caller.
     const agent = validateAgent(input.agent ?? ((input.role ?? 'worker') === 'worker' ? this.cfg.defaultWorkerAgent : undefined), input.options).agent;
     const role = input.role ?? 'worker';
-    const id = role === 'advisor' ? 'advisor' : uniqueId(input.name, this.state.workers.map(w => w.id));
-    if (this.get(id) && role === 'advisor') this.state.workers = this.state.workers.filter(w => w.id !== id);
+    const id = role === 'advisor' || role === 'reviewer' ? role : uniqueId(input.name, this.takenIds());
+    // A seat replaces an older seat with the same id. It never replaces a worker.
+    const held = this.get(id);
+    if (held && role !== 'worker') {
+      if (held.role === 'worker') throw new Error(`id ${id} is taken by a worker; rename or remove it`);
+      this.state.workers = this.state.workers.filter(w => w.id !== id);
+    }
     let cwd = input.repo;
     let branch: string | undefined;
     let worktree: string | undefined;
@@ -138,11 +150,14 @@ export class Registry extends EventTarget {
       cwd = worktree;
     }
     const n = this.state.workers.filter(x => x.role === 'worker').length;
+    const lead = this.get('advisor');
+    // The reviewer box sits right of the lead box.
+    const seatPos = role === 'reviewer' && lead ? { x: lead.x + (lead.w ?? 760) + 60, y: lead.y } : undefined;
     const w: Worker = {
       id, name: input.name, role, cwd, repo: basename(input.repo), branch, worktree,
       status: 'idle', task: 'Starting…',
       ...(agent ? { agent } : {}), ...(input.options && Object.keys(input.options).length ? { options: input.options } : {}),
-      x: role === 'advisor' ? 760 : 40 + (n % 3) * 760, y: role === 'advisor' ? 620 : (Math.floor(n / 3) % 2 ? 1200 : 40) + Math.floor(n / 6) * 1160,
+      x: seatPos?.x ?? (role === 'advisor' ? 760 : 40 + (n % 3) * 760), y: seatPos?.y ?? (role === 'advisor' ? 620 : (Math.floor(n / 3) % 2 ? 1200 : 40) + Math.floor(n / 6) * 1160),
     };
     const template = this.cfg.templates.find(t => t.name === input.template);
     await this.start(w, { resume: input.resume, template });
@@ -155,6 +170,7 @@ export class Registry extends EventTarget {
 
   async stop(id: string) {
     const w = this.get(id); if (!w) return;
+    if (this.swapping && w.role !== 'worker') throw new Error('a swap is already running');
     await this.tmux.kill(sessionName(id));
     w.status = 'stopped'; w.task = 'Stopped';
     this.activity(`Stopped ${w.name}.`);
@@ -163,6 +179,7 @@ export class Registry extends EventTarget {
 
   async restart(id: string, resume = true) {
     const w = this.get(id); if (!w) return;
+    if (this.swapping && w.role !== 'worker') throw new Error('a swap is already running');
     // Find the adapter first: an unknown agent must throw while the old session still runs.
     const adapter = adapterOf(w);
     await this.tmux.kill(sessionName(id));
@@ -173,69 +190,141 @@ export class Registry extends EventTarget {
   }
 
   private swapping = false;
-  private settleTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Change the agent of the advisor. Check everything first, then stop the old session. */
-  async swapAdvisor(agent: string): Promise<Worker> {
-    const adv = this.get('advisor');
-    if (!adv) throw new Error('no advisor');
+  /** One settle timer for each seat, so a swap of one seat does not cancel the other. */
+  private settleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private clearSettle(id: string) {
+    const t = this.settleTimers.get(id);
+    if (t) { clearTimeout(t); this.settleTimers.delete(id); }
+  }
+  private seatAdapter(id: string, agent: string): AgentAdapter {
     if (!Object.hasOwn(ADAPTERS, agent)) throw new Error(`unknown agent: ${agent} (known: ${Object.keys(ADAPTERS).join(', ')})`);
     const a = ADAPTERS[agent]!;
-    if (!a.caps.advisor) throw new Error(`${a.label} cannot be the advisor`);
-    const oldAdapter = adapterOf(adv);
-    const old = oldAdapter.id;
-    if (old === agent) return adv;
-    if (this.swapping) throw new Error('a swap is already running');
-    this.swapping = true;
-    if (this.settleTimer) { clearTimeout(this.settleTimer); this.settleTimer = null; }
-    // Hold all messages for the whole swap: the old session is dead and the new one is not ready.
-    this.pendingTools.add('advisor');
-    // Messages queued for the old session are dropped. Tell the user.
-    const dropped = this.queue.get('advisor')?.length ?? 0;
-    if (this.queue.delete('advisor')) this.emit({ t: 'queued', id: 'advisor', count: 0 });
-    if (dropped > 0) this.activity(`Dropped ${dropped} queued message(s) for the advisor (swap).`);
-    try {
-      if (adv.sessionId) adv.lastSessions = { ...adv.lastSessions, [old]: adv.sessionId };
-      // Deny every open need of the old session, as remove() does. Their waiters belong to the process that stops now.
-      for (const n of this.needs()) if (n.id === 'advisor') this.resolveNeed(n.nid, 'deny');
-      // Let the waiter code (hook server) finish before the swap sets the final status.
-      await new Promise<void>(r => setTimeout(r, 0));
-      await this.tmux.kill(sessionName('advisor'));
-      adv.agent = agent;
-      const saved = adv.lastSessions?.[agent];
-      if (saved) adv.sessionId = saved; else delete adv.sessionId;
-      try { await this.start(adv, { resume: !!adv.sessionId }, a); }
-      catch (e) {
-        this.pendingTools.delete('advisor');
-        adv.status = 'stopped'; adv.task = `Swap failed: ${(e as Error).message}`;
-        this.touch(adv);
-        throw e;
-      }
-      adv.status = 'idle';
-      adv.task = `Switched to ${a.label}`;
-      this.activity(`Advisor switched from ${oldAdapter.label} to ${a.label}${adv.sessionId ? ' (resumed)' : ''}.`);
-      this.touch(adv);
-      // Keep the busy mark while the new TUI loads. Then send the queued messages.
-      const settle = this.opts.swapSettleMs ?? SWAP_SETTLE_MS;
-      if (settle <= 0) this.toolEnd('advisor');
-      else this.settleTimer = setTimeout(() => { this.settleTimer = null; this.toolEnd('advisor'); }, settle);
-    } catch (e) {
-      this.pendingTools.delete('advisor');
-      throw e;
-    } finally { this.swapping = false; }
-    return adv;
+    if (!a.caps.advisor) throw new Error(`${a.label} cannot be the ${id}`);
+    return a;
   }
 
-  async remove(id: string) {
+  /** Change the agent of the advisor. */
+  swapAdvisor(agent: string): Promise<Worker> { return this.swapSeat('advisor', agent); }
+
+  /** Change the agent of a seat (advisor or reviewer). One lock covers both seats. */
+  async swapSeat(id: 'advisor' | 'reviewer', agent: string): Promise<Worker> {
+    // A swap of the same agent is no change, also while another swap runs.
+    const cur = this.get(id);
+    if (cur && Object.hasOwn(ADAPTERS, agent) && adapterOf(cur).id === agent && ADAPTERS[agent]!.caps.advisor) return cur;
+    if (this.swapping) throw new Error('a swap is already running');
+    this.swapping = true;
+    try { return await this.swapSeatLocked(id, agent); }
+    finally { this.swapping = false; }
+  }
+
+  /** Swap the agents of the two seats. Advisor first, then reviewer, under one lock. */
+  async swapRoles(): Promise<{ advisor: Worker; reviewer: Worker }> {
+    if (this.swapping) throw new Error('a swap is already running');
+    const lead = this.get('advisor');
+    const rev = this.reviewer();
+    if (!lead) throw new Error('no advisor');
+    if (!rev) throw new Error('no reviewer');
+    const leadAgent = adapterOf(lead).id;
+    const revAgent = adapterOf(rev).id;
+    // Check both seats first. Nothing stops when a check fails.
+    this.seatAdapter('advisor', revAgent);
+    this.seatAdapter('reviewer', leadAgent);
+    if (leadAgent === revAgent) return { advisor: lead, reviewer: rev };
+    this.swapping = true;
+    try {
+      const advisor = await this.swapSeatLocked('advisor', revAgent);
+      const reviewer = await this.swapSeatLocked('reviewer', leadAgent);
+      return { advisor, reviewer };
+    } finally { this.swapping = false; }
+  }
+
+  /** The work of a swap. The caller holds the lock. Check everything first, then stop the old session. */
+  private async swapSeatLocked(id: 'advisor' | 'reviewer', agent: string): Promise<Worker> {
+    const seat = this.get(id);
+    if (!seat) throw new Error(`no ${id}`);
+    const a = this.seatAdapter(id, agent);
+    const label = id === 'advisor' ? 'Advisor' : 'Reviewer';
+    const oldAdapter = adapterOf(seat);
+    const old = oldAdapter.id;
+    if (old === agent) return seat;
+    this.clearSettle(id);
+    // Hold all messages for the whole swap: the old session is dead and the new one is not ready.
+    this.pendingTools.add(id);
+    // Messages queued for the old session are dropped. Tell the user.
+    const dropped = this.queue.get(id)?.length ?? 0;
+    if (this.queue.delete(id)) this.emit({ t: 'queued', id, count: 0 });
+    if (dropped > 0) this.activity(`Dropped ${dropped} queued message(s) for the ${id} (swap).`);
+    try {
+      if (seat.sessionId) seat.lastSessions = { ...seat.lastSessions, [old]: seat.sessionId };
+      // Deny every open need of the old session, as remove() does. Their waiters belong to the process that stops now.
+      for (const n of this.needs()) if (n.id === id) this.resolveNeed(n.nid, 'deny');
+      // Let the waiter code (hook server) finish before the swap sets the final status.
+      await new Promise<void>(r => setTimeout(r, 0));
+      await this.tmux.kill(sessionName(id));
+      seat.agent = agent;
+      const saved = seat.lastSessions?.[agent];
+      if (saved) seat.sessionId = saved; else delete seat.sessionId;
+      try { await this.start(seat, { resume: !!seat.sessionId }, a); }
+      catch (e) {
+        this.pendingTools.delete(id);
+        seat.status = 'stopped'; seat.task = `Swap failed: ${(e as Error).message}`;
+        this.touch(seat);
+        throw e;
+      }
+      seat.status = 'idle';
+      seat.task = `Switched to ${a.label}`;
+      this.activity(`${label} switched from ${oldAdapter.label} to ${a.label}${seat.sessionId ? ' (resumed)' : ''}.`);
+      this.touch(seat);
+      // Keep the busy mark while the new TUI loads. Then send the queued messages.
+      const settle = this.opts.swapSettleMs ?? SWAP_SETTLE_MS;
+      if (settle <= 0) this.toolEnd(id);
+      else this.settleTimers.set(id, setTimeout(() => { this.settleTimers.delete(id); this.toolEnd(id); }, settle));
+    } catch (e) {
+      this.pendingTools.delete(id);
+      throw e;
+    }
+    return seat;
+  }
+
+  /** Add the reviewer next to the lead, linked to the lead only. */
+  async addReviewer(agent: string): Promise<Worker> {
+    const a = this.seatAdapter('reviewer', agent);
+    if (this.reviewer()) throw new Error('a reviewer exists');
+    if (this.get('reviewer')) throw new Error('id reviewer is taken by a worker; rename or remove it');
+    const lead = this.get('advisor');
+    if (!lead) throw new Error('no advisor');
+    const w = await this.spawn({ name: 'Reviewer', repo: lead.cwd, role: 'reviewer', agent });
+    // The user asked for this reviewer, so it always gets its wire.
+    this.connect('advisor', w.id, 'you');
+    this.activity(`Added a reviewer (${a.label}).`);
+    return w;
+  }
+
+  /** Remove the reviewer. Its needs are denied, its queue is dropped and its link goes. The lead keeps running. */
+  async removeReviewer(): Promise<void> {
+    if (!this.reviewer()) throw new Error('no reviewer');
+    const had = this.queue.has('reviewer');
+    await this.remove('reviewer', 'Removed the reviewer.');
+    if (had) this.emit({ t: 'queued', id: 'reviewer', count: 0 });
+  }
+
+  async remove(id: string, note?: string) {
     const w = this.get(id); if (!w) return;
+    // A swap holds the seat object while its session starts. Wait for it to end.
+    if (this.swapping && w.role !== 'worker') throw new Error('a swap is already running');
+    this.clearSettle(id);
+    this.pendingTools.delete(id);
     await this.tmux.kill(sessionName(id));
     this.state.workers = this.state.workers.filter(x => x.id !== id);
     this.state.links = this.state.links.filter(l => l.a !== id && l.b !== id);
+    // A cut of the reviewer link does not outlive the reviewer. The user cuts of advisor-worker links stay.
+    if (w.role === 'reviewer') this.state.cut = this.state.cut.filter(k => !k.split('~').includes(id));
     if (this.state.steps) delete this.state.steps[id];
     for (const n of this.needs()) if (n.id === id) this.resolveNeed(n.nid, 'deny');
     this.queue.delete(id);
     this.emit({ t: 'removed', id });
     this.emit({ t: 'links', links: this.state.links, cut: this.state.cut });
-    this.activity(`Removed ${w.name}.`);
+    this.activity(note ?? `Removed ${w.name}.`);
     this.persist();
   }
 
@@ -285,7 +374,7 @@ export class Registry extends EventTarget {
     for (const id of live) {
       if (this.get(id)) continue;
       // Below everything known, so a found session never covers an existing box.
-      this.state.workers.push({ id, name: id, role: id === 'advisor' ? 'advisor' : 'worker', cwd: '', repo: '?', status: 'idle', task: 'Found running', x: 40 + (k % 3) * 760, y: maxY + 600 + Math.floor(k / 3) * 600 });
+      this.state.workers.push({ id, name: id, role: id === 'advisor' || id === 'reviewer' ? id : 'worker', cwd: '', repo: '?', status: 'idle', task: 'Found running', x: 40 + (k % 3) * 760, y: maxY + 600 + Math.floor(k / 3) * 600 });
       k++;
     }
     this.persist();
@@ -296,6 +385,9 @@ export class Registry extends EventTarget {
 
   connect(a: string, b: string, by: 'advisor' | 'you'): boolean {
     if (a === b) return false;
+    // The reviewer links to the advisor only.
+    const ra = this.get(a)?.role; const rb = this.get(b)?.role;
+    if ((ra === 'reviewer' && rb !== 'advisor') || (rb === 'reviewer' && ra !== 'advisor')) return false;
     const k = linkKey(a, b);
     if (by === 'advisor' && this.state.cut.includes(k)) return false;
     if (by === 'you') this.state.cut = this.state.cut.filter(c => c !== k);
@@ -390,7 +482,7 @@ export class Registry extends EventTarget {
     const existing = this.state.workers.find(w => w.sessionId === ext.sessionId);
     if (existing) return existing;
     const w: Worker = {
-      id: uniqueId(ext.name, this.state.workers.map(x => x.id)), name: ext.name, role: 'worker', kind: 'linked',
+      id: uniqueId(ext.name, this.takenIds()), name: ext.name, role: 'worker', kind: 'linked',
       pid: ext.pid, sessionId: ext.sessionId, cwd: ext.cwd, repo: basename(ext.cwd),
       status: Registry.extStatus(ext.status), task: 'Linked: runs in its own terminal', ...this.nextSlot(),
     };
@@ -415,7 +507,7 @@ export class Registry extends EventTarget {
     if (this.alive(ext.pid)) throw new Error(`${ext.name} (pid ${ext.pid}) did not stop; close it in its tab and try again`);
     let w = this.state.workers.find(x => x.sessionId === ext.sessionId);
     if (!w) {
-      w = { id: uniqueId(ext.name, this.state.workers.map(x => x.id)), name: ext.name, role: 'worker', cwd: ext.cwd,
+      w = { id: uniqueId(ext.name, this.takenIds()), name: ext.name, role: 'worker', cwd: ext.cwd,
         repo: basename(ext.cwd), sessionId: ext.sessionId, status: 'idle', task: '', ...this.nextSlot() };
       this.state.workers.push(w);
     }

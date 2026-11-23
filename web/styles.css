@@ -52,6 +52,7 @@ select option{background:var(--panel);color:var(--ink)}
 .pulse{fill:var(--accent)}
 .node{position:absolute;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);transition:opacity .2s}
 .node.adv{border:2px solid var(--accent)}
+.node.rev{border:2px dashed var(--accent)}
 .node.sel{outline:3px solid color-mix(in srgb,var(--accent) 45%,transparent);outline-offset:2px}
 .node.dim{opacity:.35}
 .hd{display:flex;align-items:center;gap:6px;padding:7px 8px 4px 10px;cursor:grab;user-select:none}
@@ -78,7 +79,7 @@ select option{background:var(--panel);color:var(--ink)}
 .node.sized{display:flex;flex-direction:column}
 .node.sized .hd,.node.sized .task{flex:none}
 .node.sized .task{max-width:none}
-.node.sized .term-box,.node.sized .flow-box,.node.adv.sized .flow-box,.node.sized .linked-box{flex:1 1 0;min-height:0;width:auto;max-height:none}
+.node.sized .term-box,.node.sized .flow-box,.node.adv.sized .flow-box,.node.rev.sized .flow-box,.node.sized .linked-box{flex:1 1 0;min-height:0;width:auto;max-height:none}
 .node.sized .linked-box{display:flex;flex-direction:column}
 /* FitAddon measures the parent box and takes off the padding of .xterm, so the padding goes there. */
 .node.sized .term-box{padding:0}
@@ -159,7 +160,7 @@ kbd{border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;paddi
 .seg button.on{background:var(--accent);color:#fff}
 .node.flow .term-box,.node:not(.flow) .flow-box{display:none}
 .flow-box{margin:0 8px 8px;width:600px;max-height:460px;overflow-x:hidden;overflow-y:auto;font-size:16px;line-height:1.35}
-.node.adv .flow-box{width:520px}
+.node.adv .flow-box,.node.rev .flow-box{width:520px}
 .f-head{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:13px;margin:2px 0 8px}
 .f-bar{flex:1;display:flex;gap:3px}
 .f-bar i{flex:1;height:8px;border-radius:4px;background:var(--line)}

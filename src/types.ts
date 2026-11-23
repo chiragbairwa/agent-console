@@ -1,6 +1,6 @@
 import type { StepTrack } from './steps';
 
-export type Role = 'advisor' | 'worker';
+export type Role = 'advisor' | 'reviewer' | 'worker';
 export type Status = 'running' | 'needs-you' | 'waiting' | 'done' | 'idle' | 'stopped';
 
 export interface Worker {
@@ -10,7 +10,7 @@ export interface Worker {
   agent?: string;
   /** The conversation id of the agent. */
   sessionId?: string;
-  /** The last conversation id of each agent that held this seat, by agent id (advisor swap). */
+  /** The last conversation id of each agent that held this seat, by agent id (seat swap). */
   lastSessions?: Record<string, string>;
   /** The agent options from Add Worker. */
   options?: Record<string, string>;

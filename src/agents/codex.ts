@@ -48,7 +48,7 @@ export const codex: AgentAdapter = {
     }
     if (i.options.model) c(`model=${JSON.stringify(i.options.model)}`);
     if (i.options.reasoning) c(`model_reasoning_effort=${JSON.stringify(i.options.reasoning)}`);
-    if (i.w.role === 'advisor' && i.rules) c(`developer_instructions=${JSON.stringify(i.rules)}`);
+    if ((i.w.role === 'advisor' || i.w.role === 'reviewer') && i.rules) c(`developer_instructions=${JSON.stringify(i.rules)}`);
     // Without a session id, start fresh. Never use "resume --last": it can pick another session.
     if (i.resume && i.w.sessionId) cmd.push('resume', i.w.sessionId);
     // Codex has no permission mode, so template.permissionMode is ignored.
