@@ -1,3 +1,5 @@
+import type { ExecResult, HostLink } from './ssh';
+
 const ENTER_RETRIES = 2;
 const RETRY_MS = 350;
 /** Longer text needs longer before Enter: 80 ms plus 1 ms for each 10 characters, at most 580 ms. */
@@ -23,16 +25,30 @@ export function stillInInput(screen: string, text: string): boolean {
 /** Claude Code draws its input box between two horizontal rules. */
 const hasInputBox = (screen: string) => (screen.match(/^\s*─{20,}/gm) ?? []).length >= 2;
 
-/** Thin wrapper over one tmux server (`tmux -L <socket>`). */
+/** Runs tmux. `args` start with `-L <socket>`. A non-zero code is a result, not an error. */
+export type TmuxRunner = (args: string[], stdin?: string) => Promise<ExecResult>;
+
+/** The local runner: Bun.spawn on this machine. */
+const localRunner: TmuxRunner = async (args, stdin) => {
+  // Pass env: Bun.spawn does not see later changes to process.env (serve adds user bin folders to PATH).
+  const p = Bun.spawn(['tmux', ...args], { env: { ...process.env },
+    stdout: 'pipe', stderr: 'pipe', stdin: stdin === undefined ? 'ignore' : new TextEncoder().encode(stdin) });
+  const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+  return { out, err, code };
+};
+
+/** Thin wrapper over one tmux server (`tmux -L <socket>`), on this machine or on a remote host. */
 export class Tmux {
   private configured = false;
-  constructor(readonly socket = 'agent-console') {}
+  private runner: TmuxRunner;
+  private attach: (name: string) => string[];
+  constructor(readonly socket = 'agent-console', runner?: TmuxRunner, attach?: (name: string) => string[]) {
+    this.runner = runner ?? localRunner;
+    this.attach = attach ?? (name => ['tmux', '-L', this.socket, 'attach', '-t', name]);
+  }
 
   private async run(args: string[], allowFail = false, stdin?: string): Promise<string> {
-    // Pass env: Bun.spawn does not see later changes to process.env (serve adds user bin folders to PATH).
-    const p = Bun.spawn(['tmux', '-L', this.socket, ...args], { env: { ...process.env },
-      stdout: 'pipe', stderr: 'pipe', stdin: stdin === undefined ? 'ignore' : new TextEncoder().encode(stdin) });
-    const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+    const { out, err, code } = await this.runner(['-L', this.socket, ...args], stdin);
     if (code !== 0 && !allowFail) throw new Error(`tmux ${args[0]} failed: ${err.trim()}`);
     return code === 0 ? out : '';
   }
@@ -113,6 +129,15 @@ export class Tmux {
   }
 
   attachArgs(name: string): string[] {
-    return ['tmux', '-L', this.socket, 'attach', '-t', name];
+    return this.attach(name);
   }
+}
+
+/** A Tmux that runs on a remote host through its SSH link. A link that is not up counts as a tmux failure. */
+export function remoteTmux(link: HostLink, socket: string): Tmux {
+  const runner: TmuxRunner = async (args, stdin) => {
+    try { return await link.exec(['tmux', ...args], stdin); }
+    catch (e) { return { out: '', err: e instanceof Error ? e.message : String(e), code: 1 }; }
+  };
+  return new Tmux(socket, runner, name => link.sshArgs(['tmux', '-L', socket, 'attach', '-t', name], true));
 }

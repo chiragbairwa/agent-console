@@ -80,7 +80,7 @@ test('launch: rules only for advisor and reviewer', () => {
 test('launch: template prompt is last', () => {
   const { cmd } = codex.launch(input({ resume: true, w: worker({ sessionId: 's' }),
     template: { prompt: 'do it', permissionMode: 'plan' } as any }));
-  expect(cmd.slice(-3)).toEqual(['resume', 's', 'do it']);
+  expect(cmd.slice(-4)).toEqual(['resume', 's', '--', 'do it']);
   expect(cmd).not.toContain('--permission-mode');
 });
 
@@ -170,4 +170,9 @@ test('trusts the box folder for this launch, for a folder with dots and spaces',
   const cwd = '/tmp/a b/repo.dot test';
   const v = cValues(codex.launch(input({ w: { ...input().w, cwd } })).cmd);
   expect(v).toContain(`projects={ ${JSON.stringify(cwd)} = { trust_level = "trusted" } }`);
+});
+
+test('launch: a prompt that starts with - stays after --', () => {
+  const { cmd } = codex.launch(input({ template: { prompt: '--model x' } as any }));
+  expect(cmd.slice(-2)).toEqual(['--', '--model x']);
 });

@@ -15,9 +15,11 @@
     <span class="seg" id="viewSeg" title="Show live terminals or the steps of each agent"><button data-v="term">Terminals</button><button data-v="flow">Flow</button></span>
     <button class="tb" id="bAdvisor" title="Choose which agent is the advisor" hidden>Advisor</button>
     <button class="tb" id="bTheme" title="Theme: follow the system, light, or dark">Theme: Auto</button>
+    <button class="tb" id="bHosts" title="Manage the machines that run workers">Hosts</button>
     <button class="tb" id="bImport" title="Pull in Claude sessions running in your own terminals">Import Sessions</button>
     <button class="tb" id="bFit" title="Fit all (F)">Fit All</button>
     <button class="tb" id="bLayout">Auto Layout</button>
+    <button class="tb" id="bGroup" title="Put the boxes in one lane for each host">Group by Host</button>
     <button class="tb" id="bSelAll" title="Select all workers (A)">Select All</button>
     <button class="tb" id="bClear">Clear Selection</button>
     <div class="legend"><span><i></i>advisor link</span><span><i class="y"></i>your link</span><span><i class="t"></i>talking now</span></div>
@@ -37,6 +39,7 @@
           <button class="tb" id="fInfo" title="Show or hide the details panel">Details</button>
           <button class="tb" id="fInt">Interrupt</button>
           <button class="tb" id="fEditor">Open in VS Code</button>
+          <button class="tb" id="fSend" hidden>Send to Host…</button>
           <button class="tb" id="fStop">Stop</button>
         </div>
         <div class="fbody" id="fBody">
@@ -47,10 +50,12 @@
       </div>
     </div>
     <aside>
+      <section id="hostsSec"><h3>Hosts <button class="tb hadd" id="hAdd" type="button">+ Add Host</button></h3><div id="hostCards"></div></section>
       <section><h3>Needs You <span id="nCount"></span></h3><div id="needs"></div></section>
       <section><h3>Selection</h3><div id="selInfo" class="empty"></div></section>
       <section><h3>Add Worker</h3>
         <form id="addForm" class="addw">
+          <div class="seg agents" id="addHost" title="Which computer runs the new worker" hidden></div>
           <div class="seg agents" id="addAgent" title="Which agent runs in the new worker"></div>
           <select id="addRepo"><option value="">Repository…</option></select>
           <button type="button" class="tb" id="addBrowse" title="Pick any folder on this computer">Browse Folders…</button>

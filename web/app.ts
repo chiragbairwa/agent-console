@@ -4,6 +4,9 @@ import { loadCanvas, saveCanvas } from './restore';
 import type { Activity, Link, Need, StateEvent, Worker } from '../src/types';
 import type { StepTrack } from '../src/steps';
 import { Flow } from './flow';
+import { initHosts, type HostInfo } from './hosts';
+import { laneLayout, type Lane } from './lanes';
+import { openSendDialog } from './sendtohost';
 
 /** One agent from GET /api/agents. */
 interface AgentOpt { key: string; label: string; kind: 'select' | 'text'; choices?: string[]; default?: string }
@@ -26,6 +29,16 @@ let focus: { id: string; term: FocusTerm } | null = null;
 const steps = new Map<string, StepTrack>();
 const acts: Activity[] = [];
 let agents: AgentInfo[] = []; // API order. The first entry is the fallback for a worker with no agent.
+const hostMap = new Map<string, HostInfo>();
+const HOST_COLORS = ['#e0802b', '#2b9fe0', '#2bb673', '#d6457a', '#8a6ee0', '#c2a21f'];
+const SAFE_COLOR = /^(#[0-9a-fA-F]{3,8}|[a-zA-Z]{3,20})$/;
+const hostColor = (h: HostInfo) => (h.color && SAFE_COLOR.test(h.color) ? h.color : '') || HOST_COLORS[[...h.id].reduce((n, c) => n + c.charCodeAt(0), 0) % HOST_COLORS.length]!;
+/** The pill for a worker on another machine. Empty for a local worker. */
+function hostBadge(id: string | undefined): string {
+  if (!id || id === 'local') return '';
+  const h = hostMap.get(id);
+  return `<span class="hostb" style="--hc:${esc(h ? hostColor(h) : 'var(--you)')}" title="Runs on ${esc(h?.name ?? id)}">${esc(h?.name ?? id)}</span>`;
+}
 const agentOf = (w: Worker): AgentInfo | undefined => w.agent ? agents.find(a => a.id === w.agent) : agents[0];
 
 const vp = $('#vp'), world = $('#world');
@@ -49,6 +62,8 @@ async function api(path: string, body?: object) {
 
 // ---------- nodes ----------
 const isLinked = (w: Worker) => w.kind === 'linked';
+const isShell = (w: Worker) => w.kind === 'shell';
+const SHELL_ICON = '<svg class="shicon" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M4.5 6.5l2 1.5-2 1.5M8.5 10h3"/></svg>';
 
 function nodeEl(w: Worker): HTMLElement {
   let d = els.get(w.id);
@@ -65,10 +80,10 @@ function nodeEl(w: Worker): HTMLElement {
        <div class="tx">Loading the latest messages…</div>
        <div class="lk-acts"><button class="tb" data-act="adopt">Move into Console</button><button class="tb" data-act="unlink">Unlink</button></div></div>`
     : `<div class="term-box"></div><div class="flow-box"></div>`;
-  d.innerHTML = `<div class="hd" title="Drag to move · double-click to focus · shift+click to select"><span class="dot"></span><b></b><span class="agent-chip" hidden></span><span class="repo"></span>
+  d.innerHTML = `<div class="hd" title="Drag to move · double-click to focus · shift+click to select"><span class="dot"></span>${isShell(w) ? SHELL_ICON : ''}<b></b><span class="agent-chip" hidden></span><span class="hostslot"></span><span class="repo"></span>
     <span class="qchip" hidden></span><span class="badge" hidden>⚠</span>
-    ${kind === 'linked' ? '' : '<button class="ib" data-act="flip" title="Swap terminal and flow for this box">⇄</button><button class="ib" data-act="focus" title="Focus">⤢</button>'}<button class="ib" data-act="menu" title="More">⋯</button></div>
-    <div class="task"></div>${body}<div class="port" title="Drag to another box to connect"></div>
+    ${kind === 'linked' ? '' : `${isShell(w) ? '' : '<button class="ib" data-act="flip" title="Swap terminal and flow for this box">⇄</button>'}<button class="ib" data-act="focus" title="Focus">⤢</button>`}<button class="ib" data-act="menu" title="More">⋯</button></div>
+    <div class="task"></div>${body}${isShell(w) ? '' : '<div class="port" title="Drag to another box to connect"></div>'}
     <div class="grip" title="Drag to resize · double-click to reset"></div>`;
   world.appendChild(d);
   els.set(w.id, d);
@@ -111,6 +126,7 @@ function renderNode(w: Worker) {
   (d.querySelector('b') as HTMLElement).textContent = w.name;
   (d.querySelector('.repo') as HTMLElement).textContent = [w.repo, w.branch].filter(Boolean).join(' · ');
   (d.querySelector('.task') as HTMLElement).textContent = w.task;
+  (d.querySelector('.hostslot') as HTMLElement).innerHTML = hostBadge(w.host);
   const ag = agentOf(w), chip = d.querySelector('.agent-chip') as HTMLElement;
   chip.hidden = !ag;
   if (ag) {
@@ -171,6 +187,7 @@ function removeNode(id: string) {
   terms.get(id)?.dispose(); terms.delete(id);
   els.get(id)?.remove(); els.delete(id);
   workers.delete(id); sel.delete(id);
+  setLanes(null);
   if (focus?.id === id) closeFocus();
 }
 
@@ -216,7 +233,7 @@ function renderNeeds() {
         ? `<form data-answer="${n.nid}" style="display:flex;gap:6px;width:100%"><input placeholder="Your answer"><button class="yes">Answer</button></form>`
         : `<button data-open="${n.id}">Open</button>`;
     const label = { guard: 'asks to run', question: 'asks you', permission: 'needs permission', waiting: 'is waiting' }[n.kind];
-    return `<div class="need ${n.kind === 'waiting' ? 'soft' : ''}"><div class="who" data-open="${n.id}">${n.kind === 'waiting' ? '◌' : '⚠'} ${name(n.id)} ${label}</div>${esc(n.text)}<div class="acts">${acts}</div></div>`;
+    return `<div class="need ${n.kind === 'waiting' ? 'soft' : ''}"><div class="who" data-open="${n.id}">${n.kind === 'waiting' ? '◌' : '⚠'} ${name(n.id)}${hostBadge(workers.get(n.id)?.host)} ${label}</div>${esc(n.text)}<div class="acts">${acts}</div></div>`;
   }).join('') : '<div class="empty">Nothing waits on you.</div>';
   markNode('all');
 }
@@ -268,12 +285,22 @@ function onEvent(ev: StateEvent) {
       focus?.term.reconnect(); // the server restarted: the old focus socket is dead
       setTimeout(() => { canvas.draw(); if (!fitted) { fitted = true; if (!restoreCanvas()) canvas.fit(); } }, 400);
       break;
-    case 'worker': workers.set(ev.worker.id, ev.worker); markNode(ev.worker.id); if (ev.worker.id === 'advisor') renderAdvisorBtn(); break;
+    case 'worker': if (!workers.has(ev.worker.id)) setLanes(null); workers.set(ev.worker.id, ev.worker); markNode(ev.worker.id); if (ev.worker.id === 'advisor') renderAdvisorBtn(); break;
     case 'removed': removeNode(ev.id); canvas.schedule(); break;
     case 'links': links = ev.links; canvas.schedule(); dimForSel(); break;
     case 'needs': needs = ev.needs; renderNeeds(); kpisDirty = true; break;
     case 'queued': queued[ev.id] = ev.count; markNode(ev.id); break;
     case 'activity': feed(ev.item.text, ev.item.at); markNode('advisor'); break;
+    case 'host': {
+      const h = hostMap.get(ev.id);
+      if (h) {
+        const changed = h.state !== ev.state;
+        h.state = ev.state; h.latencyMs = ev.latencyMs; h.lastError = ev.lastError;
+        if (changed) { renderHostSwitch(); drawLanes(); }
+      }
+      else void loadHosts();
+      break;
+    }
     case 'steps': steps.set(ev.id, ev.track); markNode(ev.id, true); break;
     case 'pulse':
       talking.set(linkKey(ev.from, ev.to), Date.now() + 2500);
@@ -356,7 +383,7 @@ vp.addEventListener('pointerup', e => {
     if (target && target.dataset.id !== mode.from) void api('/api/links', { a: mode.from, b: target.dataset.id, op: 'connect' });
   } else if (mode?.kind === 'drag') {
     const w = workers.get(mode.id)!;
-    if (mode.moved) void api(`/api/workers/${w.id}/move`, { x: Math.round(w.x), y: Math.round(w.y) });
+    if (mode.moved) { setLanes(null); void api(`/api/workers/${w.id}/move`, { x: Math.round(w.x), y: Math.round(w.y) }); }
     else clickNode(w.id, mode.add);
   } else if (mode?.kind === 'resize' && mode.moved) {
     const id = mode.id, el = els.get(id)!;
@@ -367,6 +394,7 @@ vp.addEventListener('pointerup', e => {
     if (wk) { wk.w = w; wk.h = h; el.dataset.size = `${w}x${h}`; }
     endMode();
     terms.get(id)?.fit(true); canvas.schedule();
+    setLanes(null);
     void api(`/api/workers/${id}/resize`, { w, h });
     return;
   }
@@ -520,6 +548,7 @@ function renderFocus() {
   $('#fRepo').textContent = [w.repo, w.branch].filter(Boolean).join(' · ');
   $('#fDot').className = `dot s-${w.status}`;
   $('#fStop').textContent = w.status === 'stopped' ? 'Resume' : 'Stop';
+  $('#fSend').hidden = isShell(w) || !((!w.host || w.host === 'local') && hostMap.size > 0);
   const con = links.filter(l => l.a === w.id || l.b === w.id)
     .map(l => (workers.get(l.a === w.id ? l.b : l.a)?.name ?? '?') + (l.by === 'you' ? ' (yours)' : '')).join(', ') || 'none';
   const nd = needs.filter(n => n.id === w.id).map(n => n.text).join('; ') || '—';
@@ -538,6 +567,10 @@ function showInfo(on: boolean) {
 }
 showInfo((() => { try { return localStorage.getItem('ac.focusInfo') === '1'; } catch { return false; } })());
 $('#fInfo').onclick = () => { showInfo(!$('#fBody').classList.contains('info')); focus?.term.focus(); };
+$('#fSend').onclick = () => {
+  const w = focus && workers.get(focus.id); if (!w) return;
+  openSendDialog({ workerId: w.id, workerName: w.name, hosts: [...hostMap.values()], hostColor: id => { const h = hostMap.get(id); return h ? hostColor(h) : 'var(--you)'; }, api, esc });
+};
 $('#fInt').onclick = () => focus && void api(`/api/workers/${focus.id}/interrupt`, {});
 $('#fEditor').onclick = () => focus && void api(`/api/workers/${focus.id}/open-editor`, {});
 $('#fStop').onclick = () => {
@@ -565,6 +598,38 @@ $('#cmdForm').addEventListener('submit', e => {
 
 // ---------- add worker ----------
 let addAgent = '';
+let addHost = 'local';
+/** The query part that names the host for /api/repos, /api/dirs and /api/branches. */
+const hostQ = () => addHost === 'local' ? '' : `host=${encodeURIComponent(addHost)}`;
+/** The Host switch: This computer plus one button for each host. Hidden when there are no hosts. */
+function renderHostSwitch() {
+  hostsUi?.render();
+  const sw = $('#addHost'), list = [...hostMap.values()];
+  sw.hidden = list.length === 0;
+  if (addHost !== 'local' && !hostMap.has(addHost)) { addHost = 'local'; setPicked(''); }
+  sw.innerHTML = `<button type="button" data-host="local">This computer</button>` + list.map(h =>
+    `<button type="button" data-host="${esc(h.id)}"${h.state === 'up' ? '' : ' disabled'} title="${esc(h.state === 'up' ? h.name : `${h.name} is ${h.state}`)}" style="--ac:${esc(hostColor(h))}">${esc(h.name)}</button>`).join('');
+  if (addHost !== 'local' && hostMap.get(addHost)?.state !== 'up') { addHost = 'local'; setPicked(''); void loadRepos(); }
+  for (const b of sw.querySelectorAll<HTMLElement>('button')) b.classList.toggle('on', b.dataset.host === addHost);
+  for (const w of workers.values()) renderNode(w);
+  renderNeeds();
+}
+async function loadHosts(): Promise<void> {
+  const r = await fetch('/api/hosts'); if (!r.ok) return;
+  const { hosts } = await r.json() as { hosts: HostInfo[] };
+  hostMap.clear(); for (const h of hosts) hostMap.set(h.id, h);
+  renderHostSwitch();
+  if (focus) renderFocus();
+}
+const hostsUi = initHosts({ api, esc, hostMap, hostColor, reload: loadHosts, feed });
+$('#addHost').addEventListener('click', e => {
+  const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-host]');
+  if (!b || b.disabled || b.dataset.host === addHost) return;
+  addHost = b.dataset.host!;
+  for (const x of $('#addHost').querySelectorAll<HTMLElement>('button')) x.classList.toggle('on', x.dataset.host === addHost);
+  setPicked('');
+  void loadRepos();
+});
 function agentOpts(): Record<string, string> {
   const out: Record<string, string> = {};
   for (const el of $('#addOpts').querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-opt]')) {
@@ -636,7 +701,12 @@ $('#addAgent').addEventListener('click', e => {
   if (b) pickAgent(b.dataset.agent!);
 });
 async function loadRepos() {
-  const r = await fetch('/api/repos'); if (!r.ok) return;
+  const r = await fetch(`/api/repos?${hostQ()}`);
+  if (!r.ok) {
+    $('#addRepo').innerHTML = '<option value="">Repository…</option>';
+    if (addHost !== 'local') feed(`Cannot list repositories on ${hostMap.get(addHost)?.name ?? addHost}.`);
+    return;
+  }
   const { repos, templates } = await r.json() as { repos: { name: string; path: string }[]; templates: string[] };
   $('#addRepo').innerHTML = '<option value="">Repository…</option>' + repos.map(x => `<option value="${esc(x.path)}">${esc(x.name)}</option>`).join('');
   $('#addTpl').innerHTML = '<option value="">No template</option>' + templates.map(t => `<option>${esc(t)}</option>`).join('');
@@ -651,7 +721,7 @@ async function loadBranches() {
   list.innerHTML = ''; base.value = '';
   base.placeholder = 'From branch (default: current)';
   if (!repo) return;
-  const r = await fetch(`/api/branches?path=${encodeURIComponent(repo)}`); if (!r.ok) return;
+  const r = await fetch(`/api/branches?path=${encodeURIComponent(repo)}${hostQ() ? `&${hostQ()}` : ''}`); if (!r.ok) return;
   const b = await r.json() as { current: string | null; local: string[]; remote: string[]; error?: string };
   if (b.error) { base.placeholder = 'Not a Git repository: no worktree'; return; }
   if (b.current) base.placeholder = `From branch (default: ${b.current})`;
@@ -675,12 +745,15 @@ $('#addBrowse').onclick = () => void openBrowser();
 
 interface DirListing { path: string; parent: string | null; dirs: { name: string; path: string; git: boolean }[]; places: { name: string; path: string }[]; error?: string }
 async function openBrowser(start?: string) {
-  document.getElementById('importDlg')?.remove();
+  const old = document.getElementById('importDlg');
+  if (old?.dataset.busy) { feed('Finish or wait for the open dialog first.'); return; }
+  old?.remove();
   const dlg = document.createElement('div'); dlg.id = 'importDlg'; dlg.className = 'dirs';
   vp.appendChild(dlg);
   let hidden = false;
   const show = async (path?: string) => {
     const q = new URLSearchParams(); if (path !== undefined) q.set('path', path); if (hidden) q.set('hidden', '1');
+    if (addHost !== 'local') q.set('host', addHost);
     const r = await fetch(`/api/dirs?${q}`); if (!r.ok) return;
     const d = await r.json() as DirListing;
     dlg.dataset.path = d.path;
@@ -688,7 +761,7 @@ async function openBrowser(start?: string) {
       <p>Claude starts in the folder you choose. ⎇ marks a Git repository.</p>
       <div class="places">${d.places.map(p => `<button class="tb" data-go="${esc(p.path)}">${esc(p.name)}</button>`).join('')}
         <label class="hid"><input type="checkbox" data-hidden ${hidden ? 'checked' : ''}> Show hidden</label></div>
-      <div class="crumb">${d.parent !== null ? `<button class="ib" data-go="${esc(d.parent)}" title="Up one folder">⬆</button>` : ''}<code>${esc(d.path || 'This computer')}</code></div>
+      <div class="crumb">${d.parent !== null ? `<button class="ib" data-go="${esc(d.parent)}" title="Up one folder">⬆</button>` : ''}<code>${esc(d.path || (addHost === 'local' ? 'This computer' : hostMap.get(addHost)?.name ?? addHost))}</code></div>
       <div class="dlist">${d.error ? `<div class="empty">Cannot open this folder (${esc(d.error)}).</div>`
         : d.dirs.length ? d.dirs.map(x => `<button class="drow" data-go="${esc(x.path)}">📁 ${esc(x.name)}${x.git ? ' <span class="git">⎇ git</span>' : ''}</button>`).join('')
         : '<div class="empty">No sub-folders.</div>'}</div>
@@ -718,7 +791,7 @@ $('#addForm').addEventListener('submit', async e => {
   const branch = ($('#addBranch') as HTMLInputElement).value.trim();
   const template = ($('#addTpl') as HTMLSelectElement).value || undefined;
   const base = ($('#addBase') as HTMLInputElement).value.trim() || undefined;
-  const r = await api('/api/workers', { name, repo, worktree: branch ? { branch, base } : undefined, template, agent: addAgent || undefined, options: agentOpts() });
+  const r = await api('/api/workers', { name, repo, worktree: branch ? { branch, base } : undefined, template, host: addHost === 'local' ? undefined : addHost, agent: addAgent || undefined, options: agentOpts() });
   if (r.ok) { (e.target as HTMLFormElement).reset(); renderAgentOpts(); setPicked(''); showBase(); ($('#addName') as HTMLInputElement).placeholder = 'Name (optional)'; }
 });
 
@@ -726,10 +799,15 @@ $('#addForm').addEventListener('submit', async e => {
 interface Ext { pid: number; sessionId: string; cwd: string; name: string; status: string; startedAt: number; ancestor: boolean; known: boolean }
 
 async function openImport() {
-  document.getElementById('importDlg')?.remove();
+  const old = document.getElementById('importDlg');
+  if (old?.dataset.busy) { feed('Finish or wait for the open dialog first.'); return; }
+  old?.remove();
   const r = await fetch('/api/external'); if (!r.ok) return;
   const { sessions } = await r.json() as { sessions: Ext[] };
   const fresh = sessions.filter(s => !s.known);
+  const old2 = document.getElementById('importDlg');
+  if (old2?.dataset.busy) { feed('Finish or wait for the open dialog first.'); return; }
+  old2?.remove();
   const dlg = document.createElement('div'); dlg.id = 'importDlg';
   const home = (p: string) => p.replace(/^\/home\/[^/]+/, '~');
   const ago = (t: number) => { const m = Math.round((Date.now() - t) / 60000); return m < 60 ? `${m} min` : `${Math.round(m / 60)} h`; };
@@ -771,7 +849,39 @@ $('#bImport').onclick = () => void openImport();
 
 // ---------- toolbar + keys ----------
 $('#bFit').onclick = () => canvas.fit();
+// Lane frames (Group by Host). In memory only: the on/off flag is not saved.
+let lanes: Lane[] | null = null;
+function drawLanes() {
+  for (const e of [...world.querySelectorAll('.lane')]) e.remove();
+  if (!lanes) return;
+  for (const l of [...lanes].reverse()) {
+    const h = hostMap.get(l.host);
+    const color = h ? hostColor(h) : 'var(--accent)';
+    const d = document.createElement('div'); d.className = 'lane';
+    d.style.cssText = `left:${l.x}px;top:${l.y}px;width:${l.w}px;height:${l.h}px;--hc:${color}`;
+    d.innerHTML = `<div class="lane-hd"><i class="lane-dot"></i><b>${esc(l.name)}</b><span>${esc(l.host === 'local' ? 'local' : h?.state ?? 'unknown')}</span></div>`;
+    world.insertBefore(d, world.firstChild);
+  }
+}
+function setLanes(l: Lane[] | null) {
+  lanes = l; drawLanes();
+  $('#bGroup').classList.toggle('on', !!l);
+}
+$('#bGroup').onclick = () => {
+  if (lanes) { setLanes(null); return; }
+  const r = laneLayout([...workers.values()], [...hostMap.values()]);
+  for (const m of r.moves) {
+    const w = workers.get(m.id), el = els.get(m.id);
+    if (w) { w.x = m.x; w.y = m.y; }
+    if (el) { el.style.left = `${m.x}px`; el.style.top = `${m.y}px`; }
+    void api(`/api/workers/${m.id}/move`, { x: m.x, y: m.y });
+  }
+  setLanes(r.lanes);
+  canvas.schedule();
+  setTimeout(() => canvas.fit(), 300);
+};
 $('#bLayout').onclick = () => {
+  setLanes(null);
   const ws = [...workers.values()].filter(w => w.role === 'worker'), a = workers.get('advisor');
   const ax = 1400, ay = 1000, R = 1150;
   if (a) void api('/api/workers/advisor/move', { x: ax - 380, y: ay - 300 });
@@ -791,7 +901,7 @@ document.addEventListener('keydown', e => {
   const typing = t.matches('input,select,textarea') || !!t.closest('.xterm');
   if (e.key === 'Escape' && !t.closest('.xterm')) {
     const dlg = document.getElementById('importDlg');
-    if (dlg) dlg.remove(); else if (pop) closePop(); else if (focus) closeFocus(); else { sel.clear(); renderAll(); t.blur?.(); }
+    if (dlg) { if (!dlg.dataset.busy) dlg.remove(); } else if (pop) closePop(); else if (focus) closeFocus(); else { sel.clear(); renderAll(); t.blur?.(); }
     return;
   }
   if (e.key === 'Escape' && focus && e.shiftKey) { closeFocus(); return; } // Shift+Esc leaves focus from inside the terminal
@@ -854,6 +964,7 @@ for (const [rel, href] of [['icon', '/icon.svg'], ['manifest', '/manifest.webman
 }
 canvas.apply();
 connectState();
+void loadHosts();
 void loadRepos();
 loadAgents().catch(e => feed(`Error: cannot load the agents (${e instanceof Error ? e.message : e})`));
 setTimeout(() => { $('#hint').style.opacity = '0'; }, 8000);

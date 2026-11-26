@@ -12,6 +12,8 @@ export const HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'P
 
 export interface SessionOpts {
   bin: string[]; url: string; token: string;
+  /** Folder on a remote host. The args name the files there. The files are still written here. */
+  fileDir?: string;
   resume?: boolean; template?: Template; advisorPrompt?: string; inheritedOtelAttrs?: string;
 }
 
@@ -63,11 +65,12 @@ export function sessionFiles(w: Worker, _cfg: Config, o: SessionOpts): SessionFi
   const mcpPath = join(dir, 'mcp.json');
   writeFileSync(mcpPath, JSON.stringify(mcp, null, 2), { mode: 0o600 });
 
-  const args = ['--settings', settingsPath, '--mcp-config', mcpPath];
+  const args = ['--settings', o.fileDir ? `${o.fileDir}/settings.json` : settingsPath, '--mcp-config', o.fileDir ? `${o.fileDir}/mcp.json` : mcpPath];
   if ((w.role === 'advisor' || w.role === 'reviewer') && o.advisorPrompt) args.push('--append-system-prompt', o.advisorPrompt);
   if (o.resume) args.push(...(w.sessionId ? ['--resume', w.sessionId] : ['--continue']));
   if (o.template?.permissionMode) args.push('--permission-mode', o.template.permissionMode);
-  if (o.template?.prompt) args.push(o.template.prompt);
+  // '--' ends the options, so a prompt that starts with '-' stays text.
+  if (o.template?.prompt) args.push('--', o.template.prompt);
   return { settingsPath, mcpPath, env, args };
 }
 
@@ -80,7 +83,7 @@ export const claude: AgentAdapter = {
     // sessionFiles() finds the session folder by itself, so `i.dir` is not used here.
     const sf = sessionFiles(i.w, null as unknown as Config, {
       bin: i.bin, url: i.url, token: i.token, resume: i.resume, template: i.template,
-      advisorPrompt: i.rules, inheritedOtelAttrs: i.inheritedOtelAttrs,
+      advisorPrompt: i.rules, inheritedOtelAttrs: i.inheritedOtelAttrs, fileDir: i.fileDir,
     });
     return { cmd: ['claude', ...sf.args], env: sf.env };
   },

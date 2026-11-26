@@ -52,7 +52,7 @@ export const codex: AgentAdapter = {
     // Without a session id, start fresh. Never use "resume --last": it can pick another session.
     if (i.resume && i.w.sessionId) cmd.push('resume', i.w.sessionId);
     // Codex has no permission mode, so template.permissionMode is ignored.
-    if (i.template?.prompt) cmd.push(i.template.prompt);
+    if (i.template?.prompt) cmd.push('--', i.template.prompt);
     return { cmd, env };
   },
   hook(event: string, p: any): HookEvent | null {

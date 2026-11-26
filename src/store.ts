@@ -3,7 +3,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { configDir, configPath, desktopDir, statePath, tokenPath } from './paths';
-import type { Config, State, Worker } from './types';
+import { validateHost } from './hosts';
+import type { Config, Host, State, Worker } from './types';
 
 const ACTIVITY_MAX = 500;
 
@@ -22,6 +23,15 @@ export function loadConfig(): Config {
       agents[id] = Object.fromEntries(Object.entries(o).filter(([, v]) => typeof v === 'string'));
     }
   }
+  const hosts: Host[] = [];
+  if (Array.isArray(file.hosts)) {
+    for (const h of file.hosts) {
+      try {
+        const v = validateHost(h);
+        if (!hosts.some(x => x.id === v.id)) hosts.push(v);
+      } catch { /* drop an invalid host */ }
+    }
+  }
   return {
     roots,
     port: file.port ?? 7878,
@@ -33,7 +43,22 @@ export function loadConfig(): Config {
     ...(Object.keys(agents).length ? { agents } : {}),
     ...(typeof file.advisorAgent === 'string' ? { advisorAgent: file.advisorAgent } : {}),
     ...(typeof file.defaultWorkerAgent === 'string' ? { defaultWorkerAgent: file.defaultWorkerAgent } : {}),
+    ...(hosts.length ? { hosts } : {}),
   };
+}
+
+/** Write the hosts into config.json. Keep the other keys. */
+export function saveHosts(hosts: Host[]): void {
+  ensureDir();
+  let file: Record<string, unknown> = {};
+  try {
+    const j = JSON.parse(readFileSync(configPath(), 'utf8'));
+    if (j && typeof j === 'object' && !Array.isArray(j)) file = j;
+  } catch { /* new file */ }
+  file.hosts = hosts.map(validateHost);
+  const tmp = `${configPath()}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(file, null, 2), { mode: 0o600 });
+  renameSync(tmp, configPath());
 }
 
 const emptyState = (): State => ({ workers: [], links: [], cut: [], activity: [] });

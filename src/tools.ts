@@ -41,18 +41,19 @@ export async function handleTool(
   try {
     switch (body.tool) {
       case 'list_workers':
-        return ok(reg.workers().filter(w => w.role === 'worker').map(w => ({
+        return ok(reg.workers().filter(w => w.role === 'worker' && w.kind !== 'shell').map(w => ({
           id: w.id, name: w.name, kind: w.kind ?? 'tmux', agent: w.agent ?? 'claude', repo: w.repo, cwd: w.cwd, branch: w.branch, status: w.status, task: w.task,
           connections: connectionsOf(reg, w.id),
           needs: reg.needs().filter(n => n.id === w.id).map(n => `${n.kind}: ${n.text}`),
         })));
       case 'read_worker': {
         const w = find(a.id); if (!w) return err(`no worker ${a.id}`);
+        if (w.kind === 'shell') return err('shell boxes are private to you');
         if (w.kind === 'linked') {
           const msgs = lastMessages(transcriptPath(w.cwd, w.sessionId ?? ''), 12);
           return ok(msgs.map(m => `${m.role === 'user' ? 'USER' : 'CLAUDE'}: ${m.text.slice(0, 600)}`).join('\n\n') || '(no transcript yet)');
         }
-        return ok(await tmux.capture(sessionName(w.id), { lines: Math.min(Number(a.lines) || 80, 500) }));
+        return ok(await (w.host && w.host !== 'local' ? reg.tmuxOf(w.id) : tmux).capture(sessionName(w.id), { lines: Math.min(Number(a.lines) || 80, 500) }));
       }
       case 'send_to_worker': {
         const w = find(a.id); if (!w) return err(`no worker ${a.id}`);
@@ -60,6 +61,7 @@ export async function handleTool(
         if (w.role === 'reviewer') return err('The reviewer is not a worker. Use ask_second_opinion.');
         if (w.kind === 'linked')
           return err(`${w.name} is a linked session outside the console. Use your SendMessage tool with to: "${w.name}" to message it.`);
+        if (w.kind === 'shell') return err('shell boxes take input only from you');
         if (!reg.linked('advisor', w.id) && !reg.connect('advisor', w.id, 'advisor'))
           return err(`The link to ${w.name} was cut by the user. Ask the user with ask_user.`);
         const r = await reg.deliver('advisor', w.id, String(a.text ?? ''));
@@ -79,9 +81,10 @@ export async function handleTool(
         return ok({ id: w.id, name: w.name, cwd: w.cwd });
       }
       case 'stop_worker': { const w = find(a.id); if (!w) return err(`no worker ${a.id}`); await reg.stop(w.id); return ok('stopped'); }
-      case 'interrupt_worker': { const w = find(a.id); if (!w) return err(`no worker ${a.id}`); await reg.interrupt(w.id); return ok('interrupted'); }
+      case 'interrupt_worker': { const w = find(a.id); if (!w) return err(`no worker ${a.id}`); if (w.kind === 'shell') return err('shell boxes take input only from you'); await reg.interrupt(w.id); return ok('interrupted'); }
       case 'connect': {
         const x = find(a.a), y = find(a.b); if (!x || !y) return err('unknown worker');
+        if (x.kind === 'shell' || y.kind === 'shell') return err('shell boxes take input only from you');
         // The reviewer links only to the advisor: tell this refusal apart from a cut by the user.
         if ((x.role === 'reviewer' && y.role !== 'advisor') || (y.role === 'reviewer' && x.role !== 'advisor'))
           return err('the reviewer links only to the advisor');
@@ -116,13 +119,16 @@ export async function handleTool(
       }
       case 'send_message': {
         const to = find(a.to); if (!to) return err(`no worker ${a.to}`);
+        if (to.kind === 'shell') return err('shell boxes take input only from you');
         if (!reg.linked(caller.id, to.id)) return err(`You are not connected to ${to.name}; ask the advisor to connect you.`);
         const r = await reg.deliver(caller.id, to.id, String(a.text ?? ''));
         reg.activity(`${caller.name} → ${to.name}: ${String(a.text ?? '').slice(0, 80)}`);
         return ok(r);
       }
       case 'list_connections':
-        return ok(connectionsOf(reg, caller.id));
+        return ok(reg.links().filter(l => l.a === caller.id || l.b === caller.id)
+          .filter(l => reg.get(l.a === caller.id ? l.b : l.a)?.kind !== 'shell')
+          .map(l => { const w = reg.get(l.a === caller.id ? l.b : l.a); return { name: reg.nameOf(w?.id ?? ''), host: w?.host ?? 'local' }; }));
       default:
         return err(`unknown tool ${body.tool}`);
     }

@@ -941,3 +941,342 @@ describe('seat restart and stop during a swap (final review M1)', () => {
   });
 });
 
+
+describe('remote hosts', () => {
+  const { HostPool, TmuxPool } = require('../src/hostpool') as typeof import('../src/hostpool');
+  const { FakeRunner } = require('./fakes') as typeof import('./fakes');
+  const { readFileSync } = require('node:fs') as typeof import('node:fs');
+  let runner: InstanceType<typeof FakeRunner>;
+  let hosts: InstanceType<typeof HostPool>;
+  let listOut: string;
+  let listCode = 0; let listErr = '';
+  let shellOut = '/bin/zsh';
+  const mac = { id: 'mac', name: 'Mac', ssh: 'macmini', roots: [], tunnelPort: 17878 };
+  const remoteCmds = () => runner.cmds.map(c => c.at(-1) ?? '');
+
+  function mkRemote(over: Record<string, unknown> = {}) {
+    runner = new FakeRunner().on(['ssh', '-S', '--'], { out: 'ok\n' });
+    listOut = ''; listCode = 0; listErr = ''; shellOut = '/bin/zsh';
+    const spawn = async (cmd: string[], stdin?: string) => {
+      const last = cmd.at(-1) ?? '';
+      if (cmd[0] === 'ssh' && last.includes('HOME')) { runner.cmds.push(cmd); runner.stdins.push(stdin); return { out: '/Users/me', err: '', code: 0 }; }
+      if (cmd[0] === 'ssh' && last.includes('$SHELL')) { runner.cmds.push(cmd); runner.stdins.push(stdin); return { out: shellOut, err: '', code: 0 }; }
+      if (cmd[0] === 'ssh' && last.includes('list-sessions')) { runner.cmds.push(cmd); runner.stdins.push(stdin); return { out: listOut, err: listErr, code: listCode }; }
+      return runner.spawn(cmd, stdin);
+    };
+    hosts = new HostPool([mac, { id: 'off', name: 'Off', ssh: 'off', roots: [] }], { consolePort: 7878, sockDir: '/tmp/ac-reg-ssh', spawn });
+    const r = new Registry(new TmuxPool(tmux.asTmux(), hosts), loadConfig(), {
+      bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', now: () => now, exec: async () => {}, hosts, ...over,
+    });
+    r.addEventListener('event', e => events.push((e as CustomEvent<StateEvent>).detail));
+    return r;
+  }
+
+  test('spawn with host=mac starts the session through the mac Tmux, not the local one', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    const w = await r.spawn({ name: 'Rem', repo: '/Users/me/code/app', host: 'mac' });
+    expect(w.host).toBe('mac');
+    expect(tmux.of('newSession')).toHaveLength(0);
+    const c = remoteCmds().find(s => s.includes('new-session'))!;
+    expect(c).toContain("'ac-rem'");
+    expect(c).toContain("'/Users/me/code/app'");
+    expect(c).toContain('AC_URL=http://127.0.0.1:17878');
+  });
+
+  test('spawn with host=mac writes settings.json and mcp.json on the host with umask 077', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    await r.spawn({ name: 'Rem', repo: '/Users/me/code/app', host: 'mac' });
+    const writes = runner.cmds.map((c, i) => ({ c: c.at(-1) ?? '', s: runner.stdins[i] })).filter(x => x.c.includes('umask 077'));
+    expect(writes).toHaveLength(2);
+    expect(writes[0]!.c).toContain('/Users/me/.config/agent-console/sessions/rem/settings.json');
+    expect(writes[1]!.c).toContain('/Users/me/.config/agent-console/sessions/rem/mcp.json');
+    expect(JSON.parse(writes[1]!.s!).mcpServers['agent-console'].url).toBe('http://127.0.0.1:17878/mcp');
+  });
+
+  test('remote settings.json hooks point at the tunnel port', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    await r.spawn({ name: 'Rem', repo: '/Users/me/code/app', host: 'mac' });
+    const i = runner.cmds.findIndex(c => (c.at(-1) ?? '').includes('settings.json'));
+    const s = JSON.parse(runner.stdins[i]!);
+    expect(s.hooks.PreToolUse[0].hooks[0].url).toBe('http://127.0.0.1:17878/hook/PreToolUse');
+  });
+
+  test('remote claude args use the remote file paths', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    await r.spawn({ name: 'Rem', repo: '/Users/me/code/app', host: 'mac' });
+    const c = remoteCmds().find(s => s.includes('new-session'))!;
+    expect(c).toContain("'--settings' '/Users/me/.config/agent-console/sessions/rem/settings.json'");
+    expect(c).toContain("'--mcp-config' '/Users/me/.config/agent-console/sessions/rem/mcp.json'");
+  });
+
+  test('spawn with an unknown host throws "unknown host" and starts nothing', async () => {
+    const r = mkRemote();
+    await expect(r.spawn({ name: 'Rem', repo: '/r', host: 'nope' })).rejects.toThrow('unknown host');
+    expect(r.workers()).toHaveLength(0);
+    expect(runner.cmds).toHaveLength(0);
+  });
+
+  test('spawn with a host that is not up throws "Off is not connected"', async () => {
+    const r = mkRemote();
+    await expect(r.spawn({ name: 'Rem', repo: '/r', host: 'off' })).rejects.toThrow('Off is not connected');
+    expect(r.workers()).toHaveLength(0);
+  });
+
+  test('a non-claude agent on a remote host is refused', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    await expect(r.spawn({ name: 'A', repo: '/r', host: 'mac', agent: 'codex' })).rejects.toThrow('codex workers cannot run on a remote host yet');
+  });
+
+  test('remote worktree add runs git -C <repo> through ssh and the worker starts in the worktree', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    const w = await r.spawn({ name: 'Wt', repo: '/Users/me/code/app', host: 'mac', worktree: { branch: 'fix/x', base: 'origin/main' } });
+    const c = remoteCmds().find(s => s.includes('worktree'))!;
+    expect(c).toBe(`'git' '-C' '/Users/me/code/app' 'worktree' 'add' '-b' 'fix/x' '--' '/Users/me/code/worktrees/app-fix-x' 'origin/main'`);
+    expect(w.cwd).toBe('/Users/me/code/worktrees/app-fix-x');
+    expect(w.worktree).toBe('/Users/me/code/worktrees/app-fix-x');
+    expect(execs).toHaveLength(0); // nothing ran on this machine
+  });
+
+  test('remote worktree: a branch "-x" or base "-y" is refused before ssh runs', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    const before = runner.cmds.length;
+    await expect(r.spawn({ name: 'B', repo: '/r', host: 'mac', worktree: { branch: '-x' } })).rejects.toThrow('bad branch name');
+    await expect(r.spawn({ name: 'C', repo: '/r', host: 'mac', worktree: { branch: 'ok', base: '-y' } })).rejects.toThrow('bad branch name');
+    expect(runner.cmds.length).toBe(before);
+    expect(r.workers()).toHaveLength(0);
+  });
+
+  test('host error → its workers show Host offline; records stay; no kill', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    await r.spawn({ name: 'Rem', repo: '/r', host: 'mac' });
+    await r.spawn({ name: 'Loc', repo: '/l' });
+    (hosts.link('mac') as any).set('error');
+    expect(r.get('rem')).toMatchObject({ status: 'stopped', task: 'Host offline' });
+    expect(r.get('loc')!.status).toBe('idle');
+    expect(tmux.of('kill')).toHaveLength(0);
+    expect(remoteCmds().some(s => s.includes('kill-session'))).toBe(false);
+  });
+
+  test('host up again → discoverHost marks live sessions idle', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    await r.spawn({ name: 'Rem', repo: '/r', host: 'mac' });
+    (hosts.link('mac') as any).set('error');
+    listOut = 'ac-rem\nac-stranger\n';
+    (hosts.link('mac') as any).set('up');
+    await new Promise(res => setTimeout(res, 20));
+    expect(r.get('rem')!.status).toBe('idle');
+    expect(r.get('stranger')).toBeUndefined();
+  });
+
+  test('discover() does not stop a remote worker for a missing local session', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    await r.spawn({ name: 'Rem', repo: '/r', host: 'mac' });
+    listOut = '';
+    await r.discover();
+    expect(r.get('rem')!.status).toBe('stopped'); // the host is up and lists no session
+    listOut = 'ac-rem\n';
+    await r.discover();
+    expect(r.get('rem')!.status).toBe('idle');
+  });
+
+  test('capture tool reads through the worker host', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    await r.spawn({ name: 'Advisor', repo: '/l', role: 'advisor' });
+    await r.spawn({ name: 'Rem', repo: '/r', host: 'mac' });
+    const { handleTool } = require('../src/tools') as typeof import('../src/tools');
+    await handleTool(r, tmux.asTmux(), { caller: 'advisor', tool: 'read_worker', args: { id: 'rem' } });
+    expect(tmux.of('capture')).toHaveLength(0);
+    expect(remoteCmds().some(s => s.includes('capture-pane'))).toBe(true);
+  });
+
+  test('a failed ssh list keeps a live worker as it is; ssh code 255 marks the host offline', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    await r.spawn({ name: 'Rem', repo: '/r', host: 'mac' });
+    listCode = 2; listErr = 'tmux: bad socket';
+    await expect(r.discoverHost('mac')).rejects.toThrow('could not list');
+    expect(r.get('rem')!.status).toBe('idle');
+    listCode = 255; listErr = 'ssh: connection reset';
+    await expect(r.discoverHost('mac')).rejects.toThrow('could not list');
+    expect(hosts.link('mac').state).toBe('error');
+    expect(r.get('rem')).toMatchObject({ status: 'stopped', task: 'Host offline' });
+    await hosts.link('mac').connect();
+    listCode = 1; listErr = 'no server running on /tmp/tmux-1/agent-console';
+    await r.discoverHost('mac');
+    expect(r.get('rem')).toMatchObject({ status: 'stopped', task: 'Session not running' });
+  });
+
+  test('discover() marks workers of a host that is not up as Host offline, and of an unknown host as Host removed', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    await r.spawn({ name: 'Rem', repo: '/r', host: 'mac' });
+    await r.spawn({ name: 'Ghost', repo: '/g', host: 'mac' });
+    r.get('ghost')!.host = 'gone';
+    await hosts.link('mac').disconnect();
+    (r as any).state.workers.find((w: any) => w.id === 'rem').status = 'idle';
+    await r.discover();
+    expect(r.get('rem')).toMatchObject({ status: 'stopped', task: 'Host offline' });
+    expect(r.get('ghost')).toMatchObject({ status: 'stopped', task: 'Host removed' });
+  });
+
+  test('a stopped worker keeps its task text when the host goes offline', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    await r.spawn({ name: 'Rem', repo: '/r', host: 'mac' });
+    r.setStatus('rem', 'stopped', 'Stopped');
+    (hosts.link('mac') as any).set('error');
+    expect(r.get('rem')!.task).toBe('Stopped');
+  });
+
+  test('a worker of an unknown host can be removed and stopped', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    await r.spawn({ name: 'Rem', repo: '/r', host: 'mac' });
+    r.get('rem')!.host = 'gone';
+    await r.stop('rem');
+    await r.remove('rem');
+    expect(r.get('rem')).toBeUndefined();
+    const warn = r.snapshot().state.activity.filter(a => a.text.includes('may still run'));
+    expect(warn).toHaveLength(2);
+    expect(warn[0]!.text).toContain('gone');
+  });
+
+  test('stop and remove on a known host that is not up are refused; the worker and its session stay', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    await r.spawn({ name: 'Rem', repo: '/r', host: 'mac' });
+    (hosts.link('mac') as any).set('error');
+    const n = runner.cmds.length;
+    await expect(r.stop('rem')).rejects.toThrow('Mac is not connected. Connect the host first.');
+    await expect(r.remove('rem')).rejects.toThrow('Mac is not connected. Connect the host first.');
+    expect(r.get('rem')).toBeDefined();
+    expect(runner.cmds.length).toBe(n);
+  });
+
+  test('a host removed from the pool does not throw and marks its workers Host removed', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    await r.spawn({ name: 'Rem', repo: '/r', host: 'mac' });
+    const errors: unknown[] = [];
+    const onErr = (e: unknown) => errors.push(e);
+    process.on('uncaughtException', onErr);
+    try {
+      hosts.set([{ id: 'off', name: 'Off', ssh: 'off', roots: [] }]);
+      await new Promise(res => setTimeout(res, 10));
+    } finally { process.off('uncaughtException', onErr); }
+    expect(errors).toEqual([]);
+    expect(r.get('rem')).toMatchObject({ status: 'stopped', task: 'Host removed' });
+  });
+
+  test('a colour change of an up host leaves its workers as they are', async () => {
+    const r = mkRemote(); await hosts.link('mac').connect();
+    await r.spawn({ name: 'Rem', repo: '/r', host: 'mac' });
+    const n = runner.cmds.length;
+    await hosts.set([{ ...mac, color: '#00ff00' }, { id: 'off', name: 'Off', ssh: 'off', roots: [] }]);
+    await new Promise(res => setTimeout(res, 10));
+    expect(r.get('rem')).toMatchObject({ status: 'idle' });
+    expect(runner.cmds.length).toBe(n);
+  });
+
+  test('a local spawn still has the same newSession args and writes no remote file', async () => {
+    const r = mkRemote();
+    await r.spawn({ name: 'Loc', repo: '/l' });
+    const [name, cwd, env, cmd] = tmux.of('newSession')[0]!.args as [string, string, Record<string, string>, string[]];
+    expect([name, cwd, env.AC_URL]).toEqual(['ac-loc', '/l', 'http://x']);
+    expect(cmd[1]).toBe('--settings');
+    expect(cmd[2]).toContain('/sessions/loc/settings.json');
+    expect(runner.cmds).toHaveLength(0);
+  });
+  describe('shell box', () => {
+    const { handleTool } = require('../src/tools') as typeof import('../src/tools');
+    const { digestLines } = require('../src/digest') as typeof import('../src/digest');
+    const { handleHook } = require('../src/hookserver') as typeof import('../src/hookserver');
+
+    test('openShell starts the login shell through the host tmux, with no --settings', async () => {
+      const r = mkRemote(); await hosts.link('mac').connect();
+      const w = await r.openShell('mac');
+      expect(w).toMatchObject({ id: 'shell-mac', kind: 'shell', role: 'worker', host: 'mac', cwd: '/Users/me', name: 'Shell · Mac', status: 'idle', task: 'Shell' });
+      expect(tmux.of('newSession')).toHaveLength(0);
+      const c = remoteCmds().find(s => s.includes('new-session'))!;
+      expect(c).toContain("'ac-shell-mac'");
+      expect(c).toContain("'/bin/zsh' '-l'");
+      expect(c).not.toContain('--settings');
+      expect(c).not.toContain('AC_TOKEN');
+      expect(c).not.toContain('AC_URL');
+      expect(remoteCmds().some(s => s.includes('umask 077'))).toBe(false);
+      expect((await r.openShell('mac')).id).toBe('shell-mac-2');
+    });
+
+    test('openShell falls back to /bin/sh when $SHELL is not an absolute path', async () => {
+      const r = mkRemote(); await hosts.link('mac').connect();
+      shellOut = 'zsh; rm -rf /';
+      await r.openShell('mac');
+      expect(remoteCmds().find(s => s.includes('new-session'))!).toContain("'/bin/sh' '-l'");
+    });
+
+    test('openShell refuses an unknown host and a host that is not up', async () => {
+      const r = mkRemote();
+      await expect(r.openShell('nope')).rejects.toThrow('unknown host');
+      await expect(r.openShell('off')).rejects.toThrow('Off is not connected');
+      expect(r.workers()).toHaveLength(0);
+    });
+
+    test('openShell does not link the shell to the advisor', async () => {
+      const r = mkRemote(); await hosts.link('mac').connect();
+      await ensureAdvisor(r, { ...loadConfig(), advisorCwd: '/r' });
+      await r.openShell('mac');
+      await ensureAdvisor(r, { ...loadConfig(), advisorCwd: '/r' }); // links every worker except a shell
+      expect(r.links().some(l => l.a === 'shell-mac' || l.b === 'shell-mac')).toBe(false);
+    });
+
+    test('send_message to a shell is refused', async () => {
+      const r = mkRemote(); await hosts.link('mac').connect();
+      await r.spawn({ name: 'Nova', repo: '/r' });
+      await r.openShell('mac');
+      r.connect('nova', 'shell-mac', 'you');
+      const res = await handleTool(r, tmux.asTmux(), { caller: 'nova', tool: 'send_message', args: { to: 'shell-mac', text: 'hi' } });
+      expect(res).toEqual({ ok: false, error: 'shell boxes take input only from you' });
+    });
+
+    test('send_to_worker, read_worker and interrupt_worker refuse a shell', async () => {
+      const r = mkRemote(); await hosts.link('mac').connect();
+      await ensureAdvisor(r, { ...loadConfig(), advisorCwd: '/r' });
+      await r.openShell('mac');
+      const call = (tool: string, args: any) => handleTool(r, tmux.asTmux(), { caller: 'advisor', tool, args });
+      expect(await call('send_to_worker', { id: 'shell-mac', text: 'ls' })).toEqual({ ok: false, error: 'shell boxes take input only from you' });
+      expect(await call('read_worker', { id: 'shell-mac' })).toEqual({ ok: false, error: 'shell boxes are private to you' });
+      expect(await call('interrupt_worker', { id: 'shell-mac' })).toEqual({ ok: false, error: 'shell boxes take input only from you' });
+    });
+
+    test('connect to a shell is refused, and deliver refuses a shell for any sender but you', async () => {
+      const r = mkRemote(); await hosts.link('mac').connect();
+      await ensureAdvisor(r, { ...loadConfig(), advisorCwd: '/r' });
+      await r.spawn({ name: 'Nova', repo: '/r' });
+      await r.openShell('mac');
+      expect(await handleTool(r, tmux.asTmux(), { caller: 'advisor', tool: 'connect', args: { a: 'nova', b: 'shell-mac' } }))
+        .toEqual({ ok: false, error: 'shell boxes take input only from you' });
+      await expect(r.deliver('nova', 'shell-mac', 'x')).rejects.toThrow('shell boxes take input only from you');
+      await expect(r.deliver('advisor', 'shell-mac', 'x')).rejects.toThrow('shell boxes take input only from you');
+    });
+
+    test('list_connections leaves shells out', async () => {
+      const r = mkRemote(); await hosts.link('mac').connect();
+      await r.spawn({ name: 'Nova', repo: '/r' });
+      await r.spawn({ name: 'Pal', repo: '/r' });
+      await r.openShell('mac');
+      r.connect('nova', 'shell-mac', 'you'); r.connect('nova', 'pal', 'you');
+      const res = await handleTool(r, tmux.asTmux(), { caller: 'nova', tool: 'list_connections' });
+      expect(res).toEqual({ ok: true, result: [{ name: 'Pal', host: 'local' }] });
+    });
+
+    test('the digest skips shells and hooks for a shell are ignored', async () => {
+      const r = mkRemote(); await hosts.link('mac').connect();
+      await r.openShell('mac');
+      expect(digestLines(r, 0)).toHaveLength(0);
+      await handleHook(r, loadConfig(), { event: 'UserPromptSubmit', id: 'shell-mac', payload: { prompt: 'x' } });
+      expect(r.get('shell-mac')).toMatchObject({ status: 'idle', task: 'Shell' });
+    });
+
+    test('remove kills the tmux session of the shell box on the host', async () => {
+      const r = mkRemote(); await hosts.link('mac').connect();
+      await r.openShell('mac');
+      await r.remove('shell-mac');
+      expect(remoteCmds().some(s => s.includes('kill-session') && s.includes('ac-shell-mac'))).toBe(true);
+      expect(r.get('shell-mac')).toBeUndefined();
+    });
+  });
+});

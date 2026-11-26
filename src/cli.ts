@@ -9,6 +9,7 @@ Usage:
                                       (starts the console when it is not running)
   agent-console install-launcher      Linux: add Agent Console to the app menu
   agent-console doctor                check tmux, agents, config dir, port
+  agent-console doctor --host <id>    check one remote host over SSH
   agent-console rotate-token          make a new access token
   agent-console hook <Event>          (used by Claude Code hooks)
   agent-console mcp                   (used by Claude Code as an MCP server)
@@ -31,6 +32,18 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case 'doctor': {
+      const hi = rest.indexOf('--host');
+      if (hi >= 0) {
+        const id = rest[hi + 1];
+        if (!id) { console.error('doctor --host needs a host id'); return 2; }
+        const { getToken, loadConfig } = await import('./store');
+        const { defaultSockDir } = await import('./ssh');
+        const { hostDoctor } = await import('./doctor');
+        const cfg = loadConfig();
+        // The same port and token as `agent-console open` uses.
+        const port = Number(process.env.AC_PORT ?? cfg.port ?? 7878);
+        return hostDoctor(id, { hosts: cfg.hosts ?? [], port, token: getToken(), sockDir: defaultSockDir() });
+      }
       const checks = await runDoctor();
       for (const c of checks) console.log(`${c.warn ? '!' : c.ok ? '✓' : '✗'} ${c.name.padEnd(11)} ${c.detail}`);
       return checks.every(c => c.ok) ? 0 : 1;

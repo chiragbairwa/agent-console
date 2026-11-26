@@ -57,6 +57,7 @@ select option{background:var(--panel);color:var(--ink)}
 .node.dim{opacity:.35}
 .hd{display:flex;align-items:center;gap:6px;padding:7px 8px 4px 10px;cursor:grab;user-select:none}
 .hd b{font-size:13px;white-space:nowrap}
+.hd .shicon{flex:none;color:var(--muted,#8a8a8a)}
 .repo{color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
 .badge{background:var(--warn);color:#fff;border-radius:999px;font-size:11px;padding:0 6px}
 .qchip{background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--accent);border-radius:999px;font-size:11px;padding:0 6px}
@@ -249,3 +250,59 @@ kbd{border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;paddi
 .agent-chip[data-guard="off"]{border-color:var(--warn);color:var(--warn)}
 .tb[hidden]{display:none}
 .pop .cap:last-child{white-space:normal;max-width:240px}
+
+/* Host switch and host badge */
+.seg.agents button:disabled{opacity:.45;cursor:not-allowed}
+.hostb{font-size:11px;font-weight:600;border-radius:999px;padding:0 7px;margin:0 4px;white-space:nowrap;color:var(--hc,var(--you));border:1px solid var(--hc,var(--you))}
+.hostslot:empty{display:none}
+#addHost[hidden]{display:none}
+
+/* Hosts sidebar, host manager and profile dialog */
+#hostsSec h3{display:flex;align-items:center;justify-content:space-between}
+.hadd{font-size:11px;padding:1px 8px;text-transform:none;letter-spacing:0}
+.hcard{border:1px solid var(--line);border-left:3px solid var(--hc,var(--accent));border-radius:8px;padding:6px 8px;margin-bottom:6px;background:var(--panel)}
+.hhead{display:flex;align-items:center;gap:8px;cursor:pointer}
+.hmain{flex:1;min-width:0}.hmain .meta{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hcount{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:0 7px}
+.hchecks{margin-top:6px}
+.hchk{font-size:12px;color:var(--muted);word-break:break-word}.hchk.ok{color:var(--ok)}.hchk.wn{color:var(--run)}.hchk.bad{color:var(--warn)}
+.hacts{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.hm-bar{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.hm-bar input{flex:1;min-width:160px;border:1px solid var(--line);background:var(--bg);border-radius:6px;padding:5px 8px}
+table.hm{width:100%;border-collapse:collapse;font-size:13px}
+table.hm th{text-align:left;color:var(--muted);font-weight:500;padding:4px 6px;border-bottom:1px solid var(--line)}
+table.hm td{padding:6px;border-top:1px solid var(--line);word-break:break-word}
+table.hm tbody tr:hover{background:color-mix(in srgb,var(--accent) 8%,transparent)}
+.hlabel{font-size:11px;border:1px solid var(--line);border-radius:999px;padding:0 6px}
+.hp-tabs{margin:8px 0}
+form.hp{display:flex;flex-direction:column;gap:8px}
+form.hp [data-pane]{display:flex;flex-direction:column;gap:8px}
+form.hp [data-pane][hidden]{display:none}
+form.hp .f{display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--muted)}
+form.hp input:not([type=checkbox]),form.hp textarea{border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:6px;padding:5px 8px;font:inherit}
+form.hp .ck{display:flex;gap:6px;align-items:center;font-size:13px}
+.sw{display:flex;gap:8px}
+.swatch{width:24px;height:24px;border-radius:50%;border:2px solid transparent;padding:0}
+.swatch.on{border-color:var(--ink);outline:2px solid var(--panel);outline-offset:-4px}
+.hp-err{color:var(--warn);font-size:12px;margin-top:8px}
+.hp-checks{margin-top:8px}
+@media (max-width:600px){table.hm th:nth-child(2),table.hm td:nth-child(2),table.hm th:nth-child(3),table.hm td:nth-child(3){display:none}}
+/* Group by Host: one dashed frame for each host, behind the boxes and the wires. */
+.lane{position:absolute;box-sizing:border-box;pointer-events:none;border:2px dashed color-mix(in srgb,var(--hc) 45%,transparent);border-radius:18px;background:color-mix(in srgb,var(--hc) 5%,transparent)}
+.lane-hd{position:absolute;left:60px;top:60px;height:40px;display:flex;align-items:center;gap:12px;font-size:26px;color:var(--ink)}
+.lane-hd span{color:var(--muted);font-size:20px}
+.lane-dot{width:18px;height:18px;border-radius:50%;background:var(--hc)}
+.tb.on{border-color:var(--accent)}
+/* Send to Host dialog (shares #importDlg) */
+#importDlg.sendDlg{width:min(640px,calc(100% - 32px))}
+.sendDlg section{margin-bottom:14px}
+.sendDlg .cap{margin:0 0 8px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.sendDlg .sd-hosts{display:flex;gap:8px;flex-wrap:wrap}
+.sendDlg .sd-host{flex:1 1 180px;text-align:left;border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:10px;color:inherit}
+.sendDlg .sd-host.on{border:2px solid var(--hc,var(--accent))}
+.sendDlg .sd-host:disabled{opacity:.6;cursor:not-allowed}
+.sendDlg .opt{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:6px}
+.sendDlg .row{display:flex;gap:8px;align-items:center;font-size:12px;margin-bottom:6px}
+.sendDlg textarea,.sendDlg input[type=text]{width:100%;box-sizing:border-box;margin:0 0 6px;border:1px solid var(--line);border-radius:6px;padding:6px 8px;background:var(--panel);color:inherit;font:inherit}
+.sendDlg .sd-checks{background:var(--bg);border-radius:8px;padding:10px}
+.sendDlg .send:disabled{opacity:.5;cursor:not-allowed}

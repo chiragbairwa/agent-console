@@ -31,6 +31,8 @@ export interface LaunchInput {
   w: Worker;
   /** The session folder. */
   dir: string;
+  /** The session folder on a remote host. Only the Claude adapter uses it. */
+  fileDir?: string;
   url: string; token: string;
   /** The rules for an advisor or a reviewer. */
   rules?: string;

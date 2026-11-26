@@ -134,7 +134,13 @@ describe('worker tools', () => {
 
   test('list_connections names the linked sessions', async () => {
     reg.connect('nova', 'web-app', 'advisor');
-    expect(await call('nova', 'list_connections')).toEqual({ ok: true, result: ['Advisor', 'Web App'] });
+    expect(await call('nova', 'list_connections')).toEqual({ ok: true, result: [{ name: 'Advisor', host: 'local' }, { name: 'Web App', host: 'local' }] });
+  });
+
+  test('list_connections shows host for each worker', async () => {
+    reg.connect('nova', 'web-app', 'advisor');
+    reg.get('web-app')!.host = 'mac';
+    expect(await call('nova', 'list_connections')).toEqual({ ok: true, result: [{ name: 'Advisor', host: 'local' }, { name: 'Web App', host: 'mac' }] });
   });
 });
 

@@ -79,7 +79,7 @@ export class Flow {
   }
   setAll(on: boolean) { this.all = on; this.flipped.clear(); this.save(); this.paintSeg(); this.src.onChange(); }
   flip(id: string) { this.flipped.has(id) ? this.flipped.delete(id) : this.flipped.add(id); this.save(); }
-  isFlow(w: Worker) { return w.kind !== 'linked' && this.all !== this.flipped.has(w.id); }
+  isFlow(w: Worker) { return w.kind !== 'linked' && w.kind !== 'shell' && this.all !== this.flipped.has(w.id); }
   private anyFlow() { return this.src.workers().some(w => this.isFlow(w)); }
 
   // ---------- one box ----------

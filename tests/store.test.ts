@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getToken, loadConfig, loadState, rotateToken, saveState } from '../src/store';
+import { getToken, loadConfig, loadState, rotateToken, saveHosts, saveState } from '../src/store';
 import type { State } from '../src/types';
 
 let dir: string;
@@ -91,4 +91,21 @@ test('loadConfig reads advisorAgent', () => {
   expect(loadConfig().advisorAgent).toBe('codex');
   writeFileSync(join(dir, 'config.json'), JSON.stringify({ advisorAgent: 5 }));
   expect(loadConfig().advisorAgent).toBeUndefined();
+});
+
+describe('store hosts', () => {
+  test('loadConfig drops an invalid host and keeps a valid one', () => {
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ hosts: [
+      { id: 'mac', name: 'Mac', ssh: 'mac', roots: [] },
+      { id: 'local', name: 'Bad', ssh: 'x', roots: [] },
+    ] }));
+    expect(loadConfig().hosts?.map(h => h.id)).toEqual(['mac']);
+  });
+  test('saveHosts keeps port and roots, and the other keys', () => {
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ port: 9999 }));
+    saveHosts([{ id: 'mac', name: 'Mac', ssh: 'mac', port: 2222, roots: ['/a'] }]);
+    const c = loadConfig();
+    expect(c.hosts).toEqual([{ id: 'mac', name: 'Mac', ssh: 'mac', port: 2222, roots: ['/a'] }]);
+    expect(c.port).toBe(9999);
+  });
 });

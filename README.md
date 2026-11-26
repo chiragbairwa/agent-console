@@ -174,6 +174,70 @@ agent-console install-launcher   # Linux: add "Agent Console" to the app menu
 - **Limit:** the read-only rule is a cooperative rule. The console tool checks enforce it. It is not a security boundary.
 - **Why:** all sessions run as the same operating system user, and Codex runs without a sandbox. Each session can read the console token file. A hostile agent can bypass the rule.
 
+## Remote hosts
+
+Agent Console can run workers on other machines over SSH. A remote worker runs in tmux on the host. Its box appears on your canvas with a host badge.
+
+### What the host needs
+
+- `tmux`, `claude` and `curl` on the `PATH` of a non-interactive SSH login. SSH runs the commands of the console without the interactive shell profile, so a `PATH` set in `~/.zshrc` does not apply. On macOS with Homebrew, add `export PATH=/opt/homebrew/bin:$PATH` to `~/.zshenv` on the host.
+- `rsync` 3.0 or newer on both machines, only for the Extra folder in Send to Host. On macOS, run `brew install rsync`. The macOS default is too old.
+- A Claude login that works over SSH. On macOS the keychain can stay locked in an SSH session. Then run `claude setup-token` on the host. Put the token in the shell profile of the host as `CLAUDE_CODE_OAUTH_TOKEN`.
+- A Mac host must not sleep. Run `sudo pmset -a sleep 0` on it.
+
+### Add a host
+
+1. Click **Hosts**, then **+ Add Host**. Or click **Import ~/.ssh/config** to take the entries of your SSH config.
+2. Enter the SSH alias or `user@host`. Use `ssh-agent` or a key file for the login.
+3. Click **Save and Connect**. Click **Run Doctor** to check the host.
+
+The console stores no password. It only stores aliases and key file paths. A `password` key in the host data is refused.
+
+Each host has a **Tunnel port**. A reverse tunnel carries the hooks and the console tools from the host to this console. Give each host a port that nothing else uses on that host. When a console also runs on the host, change **Tunnel port** to a different number. A port in use makes the connect fail. The error names the port.
+
+To check one host from the shell, run:
+
+```bash
+agent-console doctor --host <id>
+```
+
+### Group by Host
+
+Click **Group by Host** in the toolbar. The boxes move into one lane for each host. A light frame shows each lane. You can still drag the boxes.
+
+### Send to Host
+
+Use **Send to Host** in the focus header of a worker to move its work to another host. The dialog sends:
+
+- the branch, as a git bundle,
+- the uncommitted changes of tracked files. Untracked files are not sent,
+- the brief of the task,
+- an optional extra folder, sent with `rsync`. The home folder is refused. A hidden folder in your home folder is refused, unless the folder is inside the worker folder.
+
+### Shell box
+
+Click **Open Shell** on a connected host. A shell box opens a plain login shell on the host. No agent runs in it. Only you can type into it. The console gives agents no way to read it or type into it. The advisor and the workers cannot link to it. This is not a security boundary: see **Not a sandbox** in [Known limits](#known-limits-version-1).
+
+### When the connection drops
+
+The remote workers keep running in tmux. Their boxes show `Host offline`. The console reconnects on its own. When the laptop sleeps, the hooks of the remote workers fail fast. The Bash fail-safe then asks in the terminal.
+
+### Known limits of remote hosts
+
+- Send to Host works only from a local worker.
+- Send to Host does not send untracked files.
+- The patch of uncommitted changes must be UTF-8 text.
+- The console token is visible for a short time in the process lists of both machines.
+- The step checklist and the transcript view are empty for a remote worker.
+- The Extra folder needs `rsync` 3.0 or newer on both machines.
+
+### Security
+
+- The web server stays on `127.0.0.1`. The reverse tunnel binds to `127.0.0.1` on the host. Nothing listens on the network.
+- The token travels in the SSH tunnel and in files of mode 600 on the host.
+- SSH runs with `BatchMode`. A host that needs a password or a prompt fails. It does not wait.
+- The console quotes every argument of a remote command. A repo path or branch name from the UI cannot inject a command.
+
 ## Config
 
 `~/.config/agent-console/config.json` (all keys are optional):

@@ -21,7 +21,7 @@ const ADVISOR_SPECS: Record<string, { description: string; input: z.ZodRawShape 
 
 const WORKER_SPECS: typeof ADVISOR_SPECS = {
   send_message: { description: 'Send a message to a connected session (by name). Only works when the advisor connected you.', input: { to: z.string(), text: z.string() } },
-  list_connections: { description: 'List the sessions you may message.', input: {} },
+  list_connections: { description: 'List the sessions you may message, each with its name and the host it runs on ("local" for this computer).', input: {} },
 };
 
 const REVIEWER_SPECS: typeof ADVISOR_SPECS = {
@@ -37,7 +37,7 @@ export type CallTool = (tool: string, args: unknown) => Promise<ToolReply>;
 
 /** The MCP server for one role. `call` runs a tool: in-process (HTTP) or through the API (stdio). */
 export function buildMcpServer(role: Role, call: CallTool): McpServer {
-  const server = new McpServer({ name: 'agent-console', version: '0.4.1' });
+  const server = new McpServer({ name: 'agent-console', version: '0.5.0' });
   const specs = SPECS_BY_ROLE[role];
   for (const [tool, spec] of Object.entries(specs)) {
     server.registerTool(tool, { description: spec.description, inputSchema: spec.input }, async (args: unknown) => {

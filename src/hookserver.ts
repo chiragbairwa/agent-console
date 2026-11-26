@@ -26,7 +26,8 @@ export async function handleHook(
   reg: Registry, cfg: Config, body: { event: string; id: string; payload: any },
 ): Promise<{ output?: object }> {
   const w = reg.get(body.id);
-  if (!w) return {};
+  // A shell box runs no agent. Its hooks are ignored.
+  if (!w || w.kind === 'shell') return {};
   let ad: AgentAdapter;
   try { ad = adapterOf(w); } catch { return {}; }
   const ev = ad.hook(body.event, body.payload ?? {});
