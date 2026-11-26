@@ -1,11 +1,15 @@
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { loadState, saveState } from './store';
 import { ADAPTERS, adapterOf, validateAgent } from './agents';
 import { sessionDir } from './paths';
+import { addRemoteWorktree, writeRemoteFile } from './remotefs';
 import type { AgentAdapter } from './agents/types';
 import { slugify, uniqueId } from './slug';
 import type { Tmux } from './tmux';
+import { HostPool, TmuxPool } from './hostpool';
+import { isLocal } from './hosts';
 import { SESSIONS_DIR, ancestorPids, envOf, listExternal, pidAlive, readSessionFile, type ExternalSession } from './external';
 import { emptyTrack, type StepTrack } from './steps';
 import type { Activity, Config, Link, Template, Need, Role, State, StateEvent, Status, Worker } from './types';
@@ -19,6 +23,8 @@ const SEAT_IDS = ['advisor', 'reviewer'];
 export interface RegistryOpts {
   bin: string[]; url: string; token: string;
   inheritedOtelAttrs?: string; advisorPrompt?: string; reviewerPrompt?: string;
+  /** The remote hosts. Without it only the local machine works. */
+  hosts?: HostPool;
   now?: () => number;
   /** How long a seat stays busy after a swap, while the new TUI loads. Default 5000. */
   swapSettleMs?: number;
@@ -33,8 +39,14 @@ export interface RegistryOpts {
 }
 
 export interface SpawnInput {
-  name: string; repo: string; role?: Role; worktree?: { branch: string; base?: string };
-  template?: string; resume?: boolean;
+  name: string; repo: string; role?: Role; worktree?: { branch: string; base?: string; existing?: boolean };
+  template?: string;
+  /** A first prompt for the agent. A template with the same name wins. */
+  prompt?: string; resume?: boolean;
+  /** Runs after the worktree exists and before the agent starts. A throw stops the start; the worktree stays. */
+  beforeStart?: (cwd: string) => Promise<void>;
+  /** The id of a remote host. A missing value or 'local' is this machine. */
+  host?: string;
   /** The agent id. A missing value uses config.defaultWorkerAgent for a worker, else claude. The advisor always uses claude. */
   agent?: string;
   options?: Record<string, string>;
@@ -57,12 +69,48 @@ export class Registry extends EventTarget {
   private now: () => number;
   private exec: (cmd: string[], cwd: string) => Promise<void>;
 
-  constructor(private tmux: Tmux, private cfg: Config, private opts: RegistryOpts) {
+  private pool: TmuxPool;
+  private hosts?: HostPool;
+
+  /** `tmux` is a TmuxPool, or one Tmux that serves the local machine only. */
+  constructor(tmux: Tmux | TmuxPool, private cfg: Config, private opts: RegistryOpts) {
     super();
+    this.hosts = opts.hosts;
+    this.pool = tmux instanceof TmuxPool ? tmux : new TmuxPool(tmux, opts.hosts ?? new HostPool([], { consolePort: 0, sockDir: '' }));
+    this.hosts?.addEventListener('state', e => {
+      const { id, profile } = (e as CustomEvent<{ id: string; profile?: boolean }>).detail;
+      // A cosmetic profile change keeps the link. The workers stay as they are.
+      if (profile) return;
+      let st: string;
+      // A host that left the config still sends its last 'down'. Its workers cannot be reached.
+      try { st = this.hosts!.link(id).state; } catch { this.hostRemoved(id); return; }
+      if (st === 'up') void this.discoverHost(id).catch(err => console.error(`host ${id}: ${(err as Error).message}`));
+      else if (st === 'down' || st === 'error') this.hostOffline(id);
+    });
     this.state = loadState();
     this.now = opts.now ?? Date.now;
     this.exec = opts.exec ?? defaultExec;
   }
+
+  /**
+   * Kill the session of a worker. A known remote host that is not up throws: the session would keep running there.
+   * A host that left the config cannot be reached. Then nothing is killed, and Activity warns about it.
+   */
+  private async killSession(w: Worker) {
+    if (!isLocal(w.host) && w.kind !== 'linked') {
+      let link;
+      try { link = this.hosts?.link(w.host!); } catch { /* the host left the config */ }
+      if (!link) {
+        this.activity(`${w.name}: the host ${w.host} is no longer in the config. Its session may still run on that machine.`);
+        return;
+      }
+      if (link.state !== 'up') throw new Error(`${link.host.name} is not connected. Connect the host first.`);
+    }
+    await this.tmuxOf(w.id).kill(sessionName(w.id));
+  }
+
+  /** The Tmux that holds the session of a worker. */
+  tmuxOf(id: string): Tmux { return this.pool.of(this.get(id)?.host); }
 
   // ---------- events / persistence ----------
   private emit(ev: StateEvent) { this.dispatchEvent(new CustomEvent('event', { detail: ev })); }
@@ -109,20 +157,65 @@ export class Registry extends EventTarget {
   }
 
   // ---------- lifecycle ----------
+  /** The link of a remote worker. Throw when the host is unknown, not connected, or cannot run the agent. */
+  private remoteLink(host: string, agent: string) {
+    if (!this.hosts) throw new Error(`unknown host ${host}`);
+    const link = this.hosts.link(host);
+    if (agent !== 'claude') throw new Error(`${agent} workers cannot run on a remote host yet`);
+    if (link.state !== 'up') throw new Error(`${link.host.name} is not connected`);
+    return link;
+  }
+
   /** Start the tmux session of a worker with its agent adapter. */
   private async start(w: Worker, extra: { resume?: boolean; template?: Template } = {}, adapter: AgentAdapter = adapterOf(w)) {
-    const { bin, url, token, inheritedOtelAttrs, advisorPrompt, reviewerPrompt } = this.opts;
+    const { bin, token, inheritedOtelAttrs, advisorPrompt, reviewerPrompt } = this.opts;
+    let { url } = this.opts;
+    // A remote worker calls the console through the reverse tunnel, and its session files live on the host.
+    const link = isLocal(w.host) ? undefined : this.remoteLink(w.host!, adapter.id);
+    let fileDir: string | undefined;
+    if (link) {
+      url = `http://127.0.0.1:${link.tunnelPort()}`;
+      fileDir = `${await link.home()}/.config/agent-console/sessions/${w.id}`;
+    }
     // The rules text depends on the seat. A worker has none.
     const seatPrompt = w.role === 'advisor' ? advisorPrompt : w.role === 'reviewer' ? reviewerPrompt : undefined;
     // Worker options win over the config of the agent. Only string values count.
     const fromCfg = Object.entries(this.cfg.agents?.[adapter.id] ?? {}).filter(([, v]) => typeof v === 'string');
     const l = adapter.launch({
-      w, dir: sessionDir(w.id), url, token, bin, inheritedOtelAttrs,
+      w, dir: sessionDir(w.id), fileDir, url, token, bin, inheritedOtelAttrs,
       rules: (w.role === 'advisor' || w.role === 'reviewer') && seatPrompt !== undefined ? (adapter.rules?.(w.role, seatPrompt) ?? seatPrompt) : undefined,
       resume: extra.resume ?? false, template: extra.template,
       options: { ...Object.fromEntries(fromCfg), ...(w.options ?? {}) }, hookTimeoutSec: this.cfg.hookTimeoutSec,
     });
-    await this.tmux.newSession(sessionName(w.id), w.cwd, l.env, l.cmd);
+    if (link && fileDir) {
+      for (const f of ['settings.json', 'mcp.json'])
+        await writeRemoteFile(link, `${fileDir}/${f}`, readFileSync(join(sessionDir(w.id), f), 'utf8'));
+    }
+    await this.pool.of(w.host).newSession(sessionName(w.id), w.cwd, l.env, l.cmd);
+  }
+
+  /** Start the login shell of a shell box. It gets no console token and no session files. */
+  private async startShell(w: Worker) {
+    const link = this.remoteLink(w.host!, 'claude');
+    const r = await link.exec(['sh', '-c', 'printf %s "$SHELL"']);
+    const out = r.code === 0 ? r.out.trim() : '';
+    const sh = /^\/[^\s;&|<>$`'"\\]+$/.test(out) ? out : '/bin/sh';
+    await this.pool.of(w.host).newSession(sessionName(w.id), w.cwd, {}, [sh, '-l']);
+  }
+
+  /** Open a plain login shell on a connected remote host. No agent runs in it. */
+  async openShell(host: string): Promise<Worker> {
+    const link = this.remoteLink(host, 'claude');
+    const id = uniqueId(`shell-${host}`, this.takenIds());
+    const w: Worker = {
+      id, name: `Shell · ${link.host.name}`, role: 'worker', kind: 'shell', host, cwd: await link.home(), repo: link.host.name,
+      status: 'idle', task: 'Shell', ...this.nextSlot(),
+    };
+    await this.startShell(w);
+    this.state.workers.push(w);
+    this.activity(`Opened a shell on ${link.host.name}.`);
+    this.touch(w);
+    return w;
   }
 
   async spawn(input: SpawnInput): Promise<Worker> {
@@ -130,6 +223,8 @@ export class Registry extends EventTarget {
     // The default worker agent is for workers only. The advisor agent comes from the caller.
     const agent = validateAgent(input.agent ?? ((input.role ?? 'worker') === 'worker' ? this.cfg.defaultWorkerAgent : undefined), input.options).agent;
     const role = input.role ?? 'worker';
+    const host = isLocal(input.host) ? undefined : input.host;
+    const rlink = host ? this.remoteLink(host, agent ?? 'claude') : undefined;
     const id = role === 'advisor' || role === 'reviewer' ? role : uniqueId(input.name, this.takenIds());
     // A seat replaces an older seat with the same id. It never replaces a worker.
     const held = this.get(id);
@@ -144,9 +239,13 @@ export class Registry extends EventTarget {
       branch = input.worktree.branch;
       const base = input.worktree.base;
       // A leading "-" would be read by git as an option.
-      if (!branch || branch.startsWith('-') || base?.startsWith('-')) throw new Error('bad branch name');
-      worktree = join(dirname(input.repo), 'worktrees', `${basename(input.repo)}-${slugify(branch)}`);
-      await this.exec(['git', 'worktree', 'add', worktree, '-b', branch, ...(base ? [base] : [])], input.repo);
+      if (rlink) {
+        worktree = await addRemoteWorktree(rlink, input.repo, branch, base, slugify, input.worktree.existing);
+      } else {
+        if (!branch || branch.startsWith('-') || base?.startsWith('-')) throw new Error('bad branch name');
+        worktree = join(dirname(input.repo), 'worktrees', `${basename(input.repo)}-${slugify(branch)}`);
+        await this.exec(['git', 'worktree', 'add', ...(input.worktree.existing ? ['--', worktree, branch] : [worktree, '-b', branch, ...(base ? [base] : [])])], input.repo);
+      }
       cwd = worktree;
     }
     const n = this.state.workers.filter(x => x.role === 'worker').length;
@@ -155,11 +254,12 @@ export class Registry extends EventTarget {
     const seatPos = role === 'reviewer' && lead ? { x: lead.x + (lead.w ?? 760) + 60, y: lead.y } : undefined;
     const w: Worker = {
       id, name: input.name, role, cwd, repo: basename(input.repo), branch, worktree,
-      status: 'idle', task: 'Starting…',
+      status: 'idle', task: 'Starting…', ...(host ? { host } : {}),
       ...(agent ? { agent } : {}), ...(input.options && Object.keys(input.options).length ? { options: input.options } : {}),
       x: seatPos?.x ?? (role === 'advisor' ? 760 : 40 + (n % 3) * 760), y: seatPos?.y ?? (role === 'advisor' ? 620 : (Math.floor(n / 3) % 2 ? 1200 : 40) + Math.floor(n / 6) * 1160),
     };
-    const template = this.cfg.templates.find(t => t.name === input.template);
+    if (input.beforeStart) await input.beforeStart(cwd);
+    const template = this.cfg.templates.find(t => t.name === input.template) ?? (input.prompt ? { name: 'prompt', prompt: input.prompt } : undefined);
     await this.start(w, { resume: input.resume, template });
     this.state.workers.push(w);
     if (role === 'worker' && this.get('advisor')) this.connect('advisor', id, 'advisor');
@@ -171,7 +271,7 @@ export class Registry extends EventTarget {
   async stop(id: string) {
     const w = this.get(id); if (!w) return;
     if (this.swapping && w.role !== 'worker') throw new Error('a swap is already running');
-    await this.tmux.kill(sessionName(id));
+    await this.killSession(w);
     w.status = 'stopped'; w.task = 'Stopped';
     this.activity(`Stopped ${w.name}.`);
     this.touch(w);
@@ -181,8 +281,16 @@ export class Registry extends EventTarget {
     const w = this.get(id); if (!w) return;
     if (this.swapping && w.role !== 'worker') throw new Error('a swap is already running');
     // Find the adapter first: an unknown agent must throw while the old session still runs.
+    if (w.kind === 'shell') {
+      await this.tmuxOf(id).kill(sessionName(id));
+      await this.startShell(w);
+      w.status = 'idle'; w.task = 'Shell';
+      this.activity(`Restarted ${w.name}.`);
+      this.touch(w);
+      return;
+    }
     const adapter = adapterOf(w);
-    await this.tmux.kill(sessionName(id));
+    await this.tmuxOf(id).kill(sessionName(id));
     await this.start(w, { resume }, adapter);
     w.status = 'idle'; w.task = 'Restarted';
     this.activity(`Restarted ${w.name}.`);
@@ -260,7 +368,7 @@ export class Registry extends EventTarget {
       for (const n of this.needs()) if (n.id === id) this.resolveNeed(n.nid, 'deny');
       // Let the waiter code (hook server) finish before the swap sets the final status.
       await new Promise<void>(r => setTimeout(r, 0));
-      await this.tmux.kill(sessionName(id));
+      await this.tmuxOf(id).kill(sessionName(id));
       seat.agent = agent;
       const saved = seat.lastSessions?.[agent];
       if (saved) seat.sessionId = saved; else delete seat.sessionId;
@@ -314,7 +422,7 @@ export class Registry extends EventTarget {
     if (this.swapping && w.role !== 'worker') throw new Error('a swap is already running');
     this.clearSettle(id);
     this.pendingTools.delete(id);
-    await this.tmux.kill(sessionName(id));
+    await this.killSession(w);
     this.state.workers = this.state.workers.filter(x => x.id !== id);
     this.state.links = this.state.links.filter(l => l.a !== id && l.b !== id);
     // A cut of the reviewer link does not outlive the reviewer. The user cuts of advisor-worker links stay.
@@ -329,7 +437,7 @@ export class Registry extends EventTarget {
   }
 
   async interrupt(id: string) {
-    await this.tmux.sendKey(sessionName(id), 'Escape');
+    await this.tmuxOf(id).sendKey(sessionName(id), 'Escape');
     this.activity(`Interrupted ${this.nameOf(id)}.`);
   }
 
@@ -363,9 +471,11 @@ export class Registry extends EventTarget {
   }
 
   async discover() {
-    const live = new Set((await this.tmux.list()).filter(s => s.startsWith('ac-')).map(s => s.slice(3)));
+    const live = new Set((await this.pool.local.list()).filter(s => s.startsWith('ac-')).map(s => s.slice(3)));
     for (const w of this.state.workers) {
       if (w.kind === 'linked') { if (!this.alive(w.pid ?? 0)) { w.status = 'stopped'; w.task = 'Session ended'; } continue; }
+      // A remote worker is checked against its own host in discoverHost.
+      if (!isLocal(w.host)) continue;
       if (live.has(w.id)) { if (w.status === 'stopped') w.status = 'idle'; }
       else { w.status = 'stopped'; w.task = 'Session not running'; }
     }
@@ -378,6 +488,55 @@ export class Registry extends EventTarget {
       k++;
     }
     this.persist();
+    for (const l of this.hosts?.all() ?? []) {
+      if (l.state === 'up') await this.discoverHost(l.host.id).catch(e => console.error(`host ${l.host.id}: ${(e as Error).message}`));
+      else this.hostOffline(l.host.id);
+    }
+    // A worker whose host left the config cannot be reached.
+    const known = new Set((this.hosts?.all() ?? []).map(l => l.host.id));
+    for (const w of this.state.workers) {
+      if (isLocal(w.host) || known.has(w.host!) || w.kind === 'linked' || w.status === 'stopped') continue;
+      w.status = 'stopped'; w.task = 'Host removed'; this.touch(w);
+    }
+  }
+
+  /** Match the workers of one host with the tmux sessions on it. Unknown remote sessions are not added. */
+  async discoverHost(id: string): Promise<void> {
+    const link = this.hosts?.link(id);
+    if (!link) throw new Error(`unknown host ${id}`);
+    // Ask ssh directly: a failed ssh call must not look like "no sessions".
+    const r = await link.exec(['tmux', '-L', this.pool.local.socket, 'list-sessions', '-F', '#{session_name}']);
+    let out = r.out;
+    if (r.code !== 0) {
+      if (r.code === 1 && /no server running|error connecting/i.test(r.err)) out = '';
+      else throw new Error(`could not list tmux sessions on ${link.host.name}: ${r.err.trim() || `code ${r.code}`}`);
+    }
+    const live = new Set(out.split('\n').filter(s => s.startsWith('ac-')).map(s => s.slice(3)));
+    for (const w of this.state.workers) {
+      if (w.host !== id || w.kind === 'linked') continue;
+      if (live.has(w.id)) {
+        if (w.status === 'stopped') { w.status = 'idle'; if (w.task === 'Host offline') w.task = 'Reconnected'; this.touch(w); }
+      } else if (w.status !== 'stopped' || w.task === 'Host offline') {
+        w.status = 'stopped'; w.task = 'Session not running'; this.touch(w);
+      }
+    }
+    this.persist();
+  }
+
+  /** The host went down. Its workers show as offline. The sessions may still run there, so nothing is killed. */
+  private hostOffline(id: string) {
+    for (const w of this.state.workers) {
+      if (w.host !== id || w.kind === 'linked' || w.status === 'stopped') continue;
+      w.status = 'stopped'; w.task = 'Host offline'; this.touch(w);
+    }
+  }
+
+  /** The host left the config. Its workers stay as records, marked as stopped. */
+  private hostRemoved(id: string) {
+    for (const w of this.state.workers) {
+      if (w.host !== id || w.kind === 'linked' || (w.status === 'stopped' && w.task === 'Host removed')) continue;
+      w.status = 'stopped'; w.task = 'Host removed'; this.touch(w);
+    }
   }
 
   // ---------- links ----------
@@ -385,6 +544,8 @@ export class Registry extends EventTarget {
 
   connect(a: string, b: string, by: 'advisor' | 'you'): boolean {
     if (a === b) return false;
+    // The advisor never wires a shell box on its own. The user still can.
+    if (by === 'advisor' && (this.get(a)?.kind === 'shell' || this.get(b)?.kind === 'shell')) return false;
     // The reviewer links to the advisor only.
     const ra = this.get(a)?.role; const rb = this.get(b)?.role;
     if ((ra === 'reviewer' && rb !== 'advisor') || (rb === 'reviewer' && ra !== 'advisor')) return false;
@@ -558,6 +719,8 @@ export class Registry extends EventTarget {
     const w = this.get(to);
     if (!w) throw new Error(`no worker ${to}`);
     if (w.kind === 'linked') throw new Error(`${w.name} is a linked session outside the console: type in its own tab, or Move into Console`);
+    // Defense in depth: only the user types into a shell box.
+    if (w.kind === 'shell' && from !== 'you') throw new Error('shell boxes take input only from you');
     // Typed keys, not text: control characters would submit early, change modes or interrupt (review I1).
     const clean = text.replace(/[\r\n\t]+/g, ' ').replace(/[\x00-\x1f\x7f]/g, '');
     const msg = from === 'you' ? clean : `[from ${this.nameOf(from)}] ${clean}`;
@@ -572,7 +735,7 @@ export class Registry extends EventTarget {
       }
       return 'queued';
     }
-    await this.tmux.sendText(sessionName(to), msg);
+    await this.tmuxOf(to).sendText(sessionName(to), msg);
     if (from !== 'you') this.pulse(from, to);
     return 'sent';
   }
@@ -587,7 +750,7 @@ export class Registry extends EventTarget {
       return;
     }
     this.queue.delete(id);
-    for (const msg of q) await this.tmux.sendText(sessionName(id), msg);
+    for (const msg of q) await this.tmuxOf(id).sendText(sessionName(id), msg);
     this.emit({ t: 'queued', id, count: 0 });
   }
 }

@@ -118,6 +118,15 @@ describe('sessionFiles', () => {
 
   test('a template adds its permission mode and first prompt', () => {
     const sf = sessionFiles(worker(), loadConfig(), { ...base, template: { name: 'qa', prompt: 'Run QA', permissionMode: 'plan' } });
-    expect(sf.args.slice(-3)).toEqual(['--permission-mode', 'plan', 'Run QA']);
+    expect(sf.args.slice(-4)).toEqual(['--permission-mode', 'plan', '--', 'Run QA']);
+  });
+});
+
+describe('sessionFiles fileDir', () => {
+  test('fileDir puts the remote paths in the args; the local files are still written', () => {
+    const sf = sessionFiles(worker(), loadConfig(), { ...base, fileDir: '/Users/me/.config/agent-console/sessions/nova' });
+    expect(sf.args.slice(0, 4)).toEqual(['--settings', '/Users/me/.config/agent-console/sessions/nova/settings.json',
+      '--mcp-config', '/Users/me/.config/agent-console/sessions/nova/mcp.json']);
+    expect(readFileSync(sf.settingsPath, 'utf8')).toContain('hooks');
   });
 });

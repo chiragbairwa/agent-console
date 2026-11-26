@@ -2,7 +2,9 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Tmux, settleMs, stillInInput } from '../src/tmux';
+import { Tmux, remoteTmux, settleMs, stillInInput } from '../src/tmux';
+import { HostLink } from '../src/ssh';
+import { FakeRunner } from './fakes';
 
 const hasTmux = !!Bun.which('tmux');
 const socket = `ac-test-${Math.random().toString(36).slice(2, 8)}`;
@@ -137,5 +139,52 @@ describe.skipIf(!hasTmux)('Tmux env', () => {
       process.env.PATH = old;
       await Bun.spawn(['tmux', '-L', sock, 'kill-server'], { stderr: 'ignore' }).exited;
     }
+  });
+});
+
+describe('Tmux with a runner', () => {
+  test('sends its args to the runner, not to Bun.spawn', async () => {
+    const r = new FakeRunner().on(['list-sessions'], { out: 'a\nb\n' });
+    const t = new Tmux('s', r.spawn);
+    expect(await t.list()).toEqual(['a', 'b']);
+    expect(r.cmds[0]!.slice(0, 3)).toEqual(['-L', 's', 'list-sessions']);
+  });
+  test('run() throws "tmux <cmd> failed" on a non-zero code, unless allowFail', async () => {
+    const r = new FakeRunner().on(['kill-session'], { code: 1, err: 'nope\n' }).on(['send-keys'], { code: 1, err: 'bad\n' });
+    const t = new Tmux('s', r.spawn);
+    await t.kill('x'); // allowFail
+    await expect(t.sendKey('x', 'a')).rejects.toThrow('tmux send-keys failed: bad');
+  });
+});
+
+describe('remoteTmux', () => {
+  const up = () => {
+    const f = new FakeRunner();
+    const link = new HostLink({ id: 'mac', name: 'Mac', ssh: 'mac', roots: [] }, { consolePort: 1, sockDir: '/tmp/ac-rt', spawn: f.spawn });
+    link.state = 'up';
+    return { f, link };
+  };
+  test('newSession runs ssh ... tmux -L agent-console new-session ... with quoted args', async () => {
+    const { f, link } = up();
+    await remoteTmux(link, 'agent-console').newSession('ac-x', '/r/my repo', { A: 'b c' }, ['claude', '--x']);
+    const c = f.cmds.find(x => x.at(-1)!.includes('new-session'))!;
+    expect(c[0]).toBe('ssh');
+    expect(c.at(-1)).toContain("'tmux' '-L' 'agent-console' 'new-session' '-d' '-s' 'ac-x' '-c' '/r/my repo'");
+    expect(c.at(-1)).toContain("'-e' 'A=b c'");
+  });
+  test('attachArgs starts with ssh -S <sock> and has -t', () => {
+    const { link } = up();
+    const a = remoteTmux(link, 'agent-console').attachArgs('ac-x');
+    expect(a.slice(0, 2)).toEqual(['ssh', '-S']);
+    expect(a[2]).toBe(link.sock());
+    expect(a).toContain('-t');
+    expect(a.at(-1)).toContain("'attach' '-t' 'ac-x'");
+  });
+  test('a link that is not up throws, but list() (allowFail) gives []', async () => {
+    const { link } = up();
+    link.state = 'down';
+    const t = remoteTmux(link, 'agent-console');
+    expect(await t.list()).toEqual([]);
+    await expect(t.sendKey('x', 'a')).rejects.toThrow('tmux send-keys failed');
   });
 });

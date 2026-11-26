@@ -1,6 +1,10 @@
-import { accessSync, constants, mkdirSync } from 'node:fs';
+import { accessSync, constants, mkdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { ADAPTERS } from './agents';
 import { configDir } from './paths';
+import { checkHost, checkMark, type Check as HostCheck } from './hostcheck';
+import { HostLink } from './ssh';
+import type { Host } from './types';
 
 export interface Check { name: string; ok: boolean; detail: string; /** The check failed, but the console still works. */ warn?: boolean }
 
@@ -58,4 +62,60 @@ export async function runDoctor(env: { PATH?: string } = {}, port = 7878): Promi
   const free = await portFree(port);
   checks.push({ name: 'port', ok: free, detail: free ? `${port} is free` : `${port} is in use (is agent-console already running?)` });
   return checks;
+}
+
+/** Connect one host, print its checks, disconnect. Returns the exit code. */
+export async function runHostDoctor(
+  link: HostLink | undefined,
+  id: string, consolePort: number, print: (line: string) => void = console.log,
+): Promise<number> {
+  if (!link) { print(`✗ unknown host ${id}`); return 1; }
+  await link.connect();
+  let checks: HostCheck[];
+  try {
+    checks = link.state === 'up'
+      ? await checkHost(link, consolePort)
+      : [{ id: 'ssh', ok: false, text: link.lastError ?? 'connect failed' }];
+  } finally { await link.disconnect(); }
+  for (const c of checks) print(`${checkMark(c)} ${c.id.padEnd(11)} ${c.text}`);
+  return checks.every(c => c.ok) ? 0 : 1;
+}
+
+export interface HostDoctorOpts {
+  hosts: Host[]; port: number; token: string;
+  /** The socket folder of the console. The CLI uses a private folder inside it. */
+  sockDir: string;
+  fetch?: (url: string, init?: RequestInit) => Promise<Response>;
+  makeLink?: (h: Host, sockDir: string) => HostLink;
+  print?: (line: string) => void;
+}
+
+/**
+ * `doctor --host <id>`. A running console owns the master and the tunnel, so ask it first.
+ * Only when no console runs, start a private master. Its -O exit cannot stop the master of a console.
+ */
+export async function hostDoctor(id: string, o: HostDoctorOpts): Promise<number> {
+  const print = o.print ?? console.log;
+  const get = o.fetch ?? ((url: string, init?: RequestInit) => fetch(url, init));
+  const base = `http://127.0.0.1:${o.port}`;
+  const headers = { 'x-ac-token': o.token };
+  let running = false;
+  try { running = (await get(`${base}/api/health`, { headers, signal: AbortSignal.timeout(1000) })).ok; } catch { /* no console */ }
+  if (running) {
+    let r: Response;
+    try { r = await get(`${base}/api/hosts/${encodeURIComponent(id)}/check`, { headers }); }
+    catch (e) { print(`✗ the console did not answer: ${(e as Error).message}`); return 1; }
+    if (r.status === 404) { print(`✗ unknown host ${id}`); return 1; }
+    if (!r.ok) { print(`✗ the console refused the check (HTTP ${r.status})`); return 1; }
+    const checks = await r.json() as HostCheck[];
+    for (const c of checks) print(`${checkMark(c)} ${c.id.padEnd(11)} ${c.text}`);
+    if (checks[0]?.id === 'ssh' && !checks[0].ok) print('  Connect the host in the console, then run the doctor again.');
+    return checks.every(c => c.ok) ? 0 : 1;
+  }
+  const host = o.hosts.find(h => h.id === id);
+  if (!host) return runHostDoctor(undefined, id, o.port, print);
+  const dir = join(o.sockDir, `doctor-${process.pid}`);
+  const link = o.makeLink ? o.makeLink(host, dir) : new HostLink(host, { consolePort: o.port, sockDir: dir });
+  try { return await runHostDoctor(link, id, o.port, print); }
+  finally { try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ } }
 }

@@ -10,7 +10,7 @@ export interface DigestLine { id: string; sig: string; text: string }
 
 export function digestLines(reg: Registry, now: number): DigestLine[] {
   const needs = reg.needs();
-  return reg.workers().filter((w: Worker) => w.role === 'worker').map(w => {
+  return reg.workers().filter((w: Worker) => w.role === 'worker' && w.kind !== 'shell').map(w => {
     const t = reg.stepsOf(w.id);
     const done = t.steps.filter(s => s.status === 'completed').length;
     const cur = t.steps.find(s => s.status === 'in_progress');

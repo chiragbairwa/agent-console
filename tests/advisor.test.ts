@@ -16,6 +16,9 @@ beforeEach(() => {
 const mk = (cfg = loadConfig()) => new Registry(tmux.asTmux(), cfg, { bin: ['/b'], url: 'u', token: 't', inheritedOtelAttrs: '', advisorPrompt: ADVISOR_PROMPT });
 
 describe('advisor rules text', () => {
+  test('advisor prompt mentions other machines', () => {
+    expect(ADVISOR_PROMPT).toContain('Workers can run on other machines. The host of each worker is in list_connections.');
+  });
   test('advisorPrompt lists every adapter id and says "Other agent sessions"', () => {
     const p = advisorPrompt(Object.keys(ADAPTERS));
     expect(p).toContain('Other agent sessions');

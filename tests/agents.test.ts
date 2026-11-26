@@ -45,3 +45,7 @@ test('contract: every adapter', () => {
     expect(l.cmd[0]).toBe(a.bin);
   }
 });
+test('claude launch: a prompt that starts with - stays after --', () => {
+  const l = ADAPTERS.claude!.launch({ w: worker(), dir: '', url: 'http://x', token: 't', bin: ['/b'], resume: false, options: {}, inheritedOtelAttrs: '', template: { name: 'p', prompt: '--model x' } });
+  expect(l.cmd.slice(-2)).toEqual(['--', '--model x']);
+});

@@ -1,4 +1,5 @@
 import type { StepTrack } from './steps';
+import type { LinkState } from './ssh';
 
 export type Role = 'advisor' | 'reviewer' | 'worker';
 export type Status = 'running' | 'needs-you' | 'waiting' | 'done' | 'idle' | 'stopped';
@@ -18,7 +19,24 @@ export interface Worker {
   /** The outer size of the box in world pixels. A missing value means the default size. */
   w?: number; h?: number;
   /** 'linked' = a session outside the console, shown as a card (no tmux). Default 'tmux'. */
-  kind?: 'tmux' | 'linked'; pid?: number;
+  kind?: 'tmux' | 'linked' | 'shell'; pid?: number;
+  /** The id of the host that runs this worker. A missing value or 'local' means this machine. */
+  host?: string;
+}
+
+/** A remote machine that the console reaches over SSH. */
+export interface Host {
+  id: string;            // slug, unique, never 'local'
+  name: string;          // "Mac mini"
+  group?: string; labels?: string[]; color?: string;  // lane and badge colour
+  ssh: string;           // an ~/.ssh/config alias, or user@server
+  port?: number;         // default 22
+  identityFile?: string; // optional key file path; no password
+  jump?: string;         // optional ProxyJump
+  roots: string[];       // repo folders on the host
+  tunnelPort?: number;   // remote port of the reverse tunnel; default = console port
+  autoConnect?: boolean; reconnect?: boolean; warnSleep?: boolean;
+  notes?: string;
 }
 
 export interface Link { a: string; b: string; by: 'advisor' | 'you' }
@@ -41,6 +59,8 @@ export interface Config {
   defaultWorkerAgent?: string;
   /** The agent of a new advisor. A missing value means claude. */
   advisorAgent?: string;
+  /** The remote hosts. */
+  hosts?: Host[];
 }
 
 export interface State {
@@ -58,4 +78,5 @@ export type StateEvent =
   | { t: 'pulse'; from: string; to: string }
   | { t: 'activity'; item: Activity }
   | { t: 'queued'; id: string; count: number }
-  | { t: 'steps'; id: string; track: StepTrack };
+  | { t: 'steps'; id: string; track: StepTrack }
+  | { t: 'host'; id: string; state: LinkState; latencyMs?: number; lastError?: string };

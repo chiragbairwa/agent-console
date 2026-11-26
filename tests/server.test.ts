@@ -8,6 +8,7 @@ import { Registry } from '../src/workers';
 import { loadConfig } from '../src/store';
 import type { StateEvent } from '../src/types';
 import { FakeTmux } from './fakes';
+import { HostPool } from '../src/hostpool';
 
 const TOKEN = 'a'.repeat(64);
 let server: Server<unknown>;
@@ -34,6 +35,19 @@ beforeEach(async () => {
 afterEach(() => server.stop(true));
 
 const auth = { 'x-ac-token': TOKEN };
+
+describe('POST /api/workers allow-list', () => {
+  test('a body beforeStart is ignored', async () => {
+    const seen: any[] = [];
+    const orig = reg.spawn.bind(reg);
+    reg.spawn = (async (i: any) => { seen.push(i); return orig(i); }) as typeof reg.spawn;
+    const r = await fetch(`${base}/api/workers`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Zed', repo: join(root, 'RepoA'), beforeStart: 'x', evil: 1 }) });
+    expect(r.status).toBe(200);
+    expect(seen[0]).not.toHaveProperty('beforeStart');
+    expect(seen[0]).not.toHaveProperty('evil');
+    expect(seen[0].role).toBe('worker');
+  });
+});
 
 describe('server auth', () => {
   test('no token → 403', async () => {
@@ -454,5 +468,259 @@ describe('reviewer routes', () => {
     await swap;
     expect(reg.get('reviewer')).toBeDefined();
     expect([...tmux.sessions].filter(n => n === 'ac-reviewer').length).toBe(1);
+  });
+});
+
+describe('hostOk with tunnel ports', () => {
+  let s2: Server<unknown>;
+  afterEach(() => s2.stop(true));
+  const start = () => {
+    const hosts = new HostPool([{ id: 'mac', name: 'Mac', ssh: 'mac', roots: [], tunnelPort: 17878 }], { consolePort: 1, sockDir: '/tmp/ac-srv-hp' });
+    s2 = startServer({ reg, cfg: loadConfig(), token: TOKEN, port: 0, tmux: tmux.asTmux(), hosts });
+    return `http://127.0.0.1:${s2.port}`;
+  };
+  test('accepts 127.0.0.1:17878 when a host has that tunnelPort, with the token', async () => {
+    const b = start();
+    expect((await fetch(`${b}/api/state`, { headers: { ...auth, host: '127.0.0.1:17878' } })).status).toBe(200);
+    expect((await fetch(`${b}/api/state`, { headers: { ...auth, host: '127.0.0.1:17878', origin: 'http://127.0.0.1:17878' } })).status).toBe(200);
+  });
+  test('refuses 127.0.0.1:17878 without the token', async () => {
+    const b = start();
+    expect((await fetch(`${b}/api/state`, { headers: { host: '127.0.0.1:17878' } })).status).toBe(403);
+  });
+  test('refuses 127.0.0.1:9999 (no host has it)', async () => {
+    const b = start();
+    expect((await fetch(`${b}/api/state`, { headers: { ...auth, host: '127.0.0.1:9999' } })).status).toBe(403);
+  });
+});
+
+describe('remote host routes', () => {
+  let s2: Server<unknown>;
+  let seen: string[];
+  afterEach(() => s2.stop(true));
+  const start = async () => {
+    seen = [];
+    const spawn = async (cmd: string[]) => {
+      const last = cmd.at(-1) ?? '';
+      if (cmd[0] !== 'ssh') return { out: '', err: '', code: 0 };
+      if (last.includes('HOME')) return { out: '/Users/me', err: '', code: 0 };
+      if (last.includes('connected')) return { out: 'ok\n', err: '', code: 0 };
+      seen.push(last);
+      if (last.includes("'find'")) return { out: '/Users/me/code/app/.git\n', err: '', code: 0 };
+      if (last.includes('--show-current')) return { out: 'main\n', err: '', code: 0 };
+      if (last.includes('refs/heads')) return { out: 'main\n', err: '', code: 0 };
+      if (last.includes('refs/remotes')) return { out: 'origin/main\n', err: '', code: 0 };
+      if (last.includes("'ls'")) return { out: './\n../\nsub/\n', err: '', code: 0 };
+      return { out: 'ok\n', err: '', code: 0 };
+    };
+    const hosts = new HostPool([{ id: 'mac', name: 'Mac', ssh: 'mac', roots: ['~/code'] }, { id: 'off', name: 'Off', ssh: 'off', roots: [] }], { consolePort: 1, sockDir: '/tmp/ac-srv-rt', spawn });
+    await hosts.link('mac').connect();
+    s2 = startServer({ reg, cfg: { ...loadConfig(), roots: [] }, token: TOKEN, port: 0, tmux: tmux.asTmux(), hosts });
+    return `http://127.0.0.1:${s2.port}`;
+  };
+  test('GET /api/repos?host=mac lists repos from the mac roots', async () => {
+    const b = await start();
+    const j = await (await fetch(`${b}/api/repos?host=mac`, { headers: auth })).json() as any;
+    expect(j.repos).toEqual([{ name: 'app', path: '/Users/me/code/app' }]);
+    expect(Array.isArray(j.templates)).toBe(true);
+  });
+  test('GET /api/branches?host=mac&path=/r runs git -C /r through ssh', async () => {
+    const b = await start();
+    const j = await (await fetch(`${b}/api/branches?host=mac&path=${encodeURIComponent('/r')}`, { headers: auth })).json() as any;
+    expect(j).toEqual({ current: 'main', local: ['main'], remote: ['origin/main'] });
+    expect(seen.some(s => s.includes(`'git' '-C' '/r'`))).toBe(true);
+  });
+  test('GET /api/dirs?host=mac lists remote folders', async () => {
+    const b = await start();
+    const j = await (await fetch(`${b}/api/dirs?host=mac&path=${encodeURIComponent('/Users/me')}`, { headers: auth })).json() as any;
+    expect(j.dirs.map((d: { name: string }) => d.name)).toEqual(['sub']);
+  });
+  test('a repo path with a space and $(x) reaches the host as one literal argument', async () => {
+    const b = await start();
+    await fetch(`${b}/api/branches?host=mac&path=${encodeURIComponent('/r/my repo $(x)')}`, { headers: auth });
+    expect(seen.some(s => s.includes(`'-C' '/r/my repo $(x)'`))).toBe(true);
+  });
+  test('?host=nope → 404 unknown host, for all three routes', async () => {
+    const b = await start();
+    for (const r of ['repos', 'dirs', 'branches']) {
+      const res = await fetch(`${b}/api/${r}?host=nope&path=/r`, { headers: auth });
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'unknown host' });
+    }
+  });
+  test('?host=off (known, not up) → 409 Off is not connected', async () => {
+    const b = await start();
+    const res = await fetch(`${b}/api/repos?host=off`, { headers: auth });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'Off is not connected' });
+  });
+  test('?host=local behaves as today', async () => {
+    const b = await start();
+    const res = await fetch(`${b}/api/repos?host=local`, { headers: auth });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe('host api', () => {
+  let s2: Server<unknown>;
+  let b2: string;
+  afterEach(() => s2.stop(true));
+  const start = async () => {
+    const spawn = async (cmd: string[]) => {
+      if (cmd[0] !== 'ssh') return { out: '', err: '', code: 0 };
+      const last = cmd.at(-1) ?? '';
+      if (last.includes('HOME')) return { out: '/Users/me', err: '', code: 0 };
+      return { out: 'ok\n', err: '', code: 0 };
+    };
+    const hosts = new HostPool([{ id: 'mac', name: 'Mac', ssh: 'mac', roots: [] }], { consolePort: 1, sockDir: '/tmp/ac-srv-api', spawn });
+    s2 = startServer({ reg, cfg: { ...loadConfig(), roots: [] }, token: TOKEN, port: 0, tmux: tmux.asTmux(), hosts });
+    b2 = `http://127.0.0.1:${s2.port}`;
+    return hosts;
+  };
+  const post = (path: string, body: unknown) => fetch(`${b2}${path}`, { method: 'POST', headers: auth, body: JSON.stringify(body) });
+
+  test('GET /api/hosts returns state and worker count', async () => {
+    await start();
+    reg.get('nova')!.host = 'mac';
+    const j = await (await fetch(`${b2}/api/hosts`, { headers: auth })).json() as any;
+    expect(j.hosts).toHaveLength(1);
+    expect(j.hosts[0]).toMatchObject({ id: 'mac', name: 'Mac', state: 'down', workers: 1 });
+  });
+  test('POST /api/hosts/<id>/shell: unknown host is 404, a down host is 409', async () => {
+    const hosts = await start();
+    const reg2 = new Registry(tmux.asTmux(), { ...loadConfig(), roots: [] }, { bin: ['/b'], url: 'u', token: TOKEN, inheritedOtelAttrs: '', sessionsDir, alive: () => true, ancestors: [], procStartOf: () => '1', cmdlineOf: () => 'claude', hosts });
+    s2.stop(true);
+    s2 = startServer({ reg: reg2, cfg: { ...loadConfig(), roots: [] }, token: TOKEN, port: 0, tmux: tmux.asTmux(), hosts });
+    b2 = `http://127.0.0.1:${s2.port}`;
+    expect((await post('/api/hosts/nope/shell', {})).status).toBe(404);
+    const r = await post('/api/hosts/mac/shell', {});
+    expect(r.status).toBe(409);
+    expect(((await r.json()) as any).error).toContain('is not connected');
+  });
+  test('send routes: unknown host is 404, a down host fails the check step', async () => {
+    await start();
+    expect((await fetch(`${b2}/api/workers/nova/send-preview?to=nope`, { headers: auth })).status).toBe(404);
+    expect((await post('/api/workers/nova/send', { to: 'nope' })).status).toBe(404);
+    expect((await post('/api/workers/nova/send', {})).status).toBe(400);
+    const j = await (await post('/api/workers/nova/send', { to: 'mac' })).json() as any;
+    expect(j.steps[0]).toMatchObject({ name: 'check', ok: false });
+  });
+  test('POST /api/workers with a host: no local path check; unknown host 404, down host 409, up host starts', async () => {
+    const hosts = await start();
+    const reg2 = new Registry(tmux.asTmux(), { ...loadConfig(), roots: [] }, { bin: ['/b'], url: 'u', token: TOKEN, inheritedOtelAttrs: '', sessionsDir, alive: () => true, ancestors: [], procStartOf: () => '1', cmdlineOf: () => 'claude', hosts });
+    s2.stop(true);
+    s2 = startServer({ reg: reg2, cfg: { ...loadConfig(), roots: [] }, token: TOKEN, port: 0, tmux: tmux.asTmux(), hosts });
+    b2 = `http://127.0.0.1:${s2.port}`;
+    const body = (host: string) => ({ name: 'Rem', repo: '/Users/me/no-such-local-dir/app', host });
+    let r = await post('/api/workers', body('nope'));
+    expect(r.status).toBe(404);
+    expect(await r.json()).toEqual({ error: 'unknown host' });
+    r = await post('/api/workers', body('mac'));
+    expect(r.status).toBe(409);
+    expect(await r.json()).toEqual({ error: 'Mac is not connected' });
+    await hosts.link('mac').connect();
+    r = await post('/api/workers', body('mac'));
+    expect(r.status).toBe(200);
+    expect(((await r.json()) as any).host).toBe('mac');
+    r = await post('/api/workers', { name: 'Loc', repo: '/no/such/local/dir' });
+    expect(r.status).toBe(400);
+  });
+  test('stop and remove of a worker on a down host → 409', async () => {
+    const hosts = await start();
+    const reg2 = new Registry(tmux.asTmux(), { ...loadConfig(), roots: [] }, { bin: ['/b'], url: 'u', token: TOKEN, inheritedOtelAttrs: '', sessionsDir, alive: () => true, ancestors: [], procStartOf: () => '1', cmdlineOf: () => 'claude', hosts });
+    s2.stop(true);
+    s2 = startServer({ reg: reg2, cfg: { ...loadConfig(), roots: [] }, token: TOKEN, port: 0, tmux: tmux.asTmux(), hosts });
+    b2 = `http://127.0.0.1:${s2.port}`;
+    await hosts.link('mac').connect();
+    await reg2.spawn({ name: 'Rem', repo: '/Users/me/app', host: 'mac' });
+    await hosts.link('mac').disconnect();
+    for (const a of ['stop', 'remove']) {
+      const r = await post(`/api/workers/rem/${a}`, {});
+      expect(r.status).toBe(409);
+      expect(((await r.json()) as any).error).toBe('Mac is not connected. Connect the host first.');
+    }
+    expect(reg2.get('rem')).toBeDefined();
+  });
+  test('POST /api/workers: a prompt that is not a string is 400', async () => {
+    await start();
+    const r = await post('/api/workers', { name: 'X', repo: '/tmp', prompt: { a: 1 } });
+    expect(r.status).toBe(400);
+    expect((await r.json() as any).error).toContain('prompt');
+  });
+  test('POST /api/hosts with a password field → 400 naming password', async () => {
+    await start();
+    const r = await post('/api/hosts', { hosts: [{ id: 'm', name: 'M', ssh: 'a', roots: [], password: 'x' }] });
+    expect(r.status).toBe(400);
+    expect(((await r.json()) as any).error).toContain('password');
+  });
+  test('POST /api/hosts with a CSS-injecting colour → 400 naming color', async () => {
+    await start();
+    const r = await post('/api/hosts', { hosts: [{ id: 'm', name: 'M', ssh: 'a', roots: [], color: 'red;background:url(x)' }] });
+    expect(r.status).toBe(400);
+    expect(((await r.json()) as any).error).toContain('color');
+  });
+  test('POST /api/hosts refuses a duplicate id', async () => {
+    await start();
+    const h = { id: 'm', name: 'M', ssh: 'a', roots: [] };
+    const r = await post('/api/hosts', { hosts: [h, h] });
+    expect(r.status).toBe(400);
+    expect(((await r.json()) as any).error).toContain('duplicate');
+  });
+  test('POST /api/hosts saves to config.json and updates the pool', async () => {
+    const hosts = await start();
+    const r = await post('/api/hosts', { hosts: [{ id: 'new', name: 'New', ssh: 'new', roots: [] }] });
+    expect(r.status).toBe(200);
+    expect(hosts.all().map(l => l.host.id)).toEqual(['new']);
+    expect(loadConfig().hosts?.map(h => h.id)).toEqual(['new']);
+  });
+  test('POST /api/hosts/mac/connect calls HostLink.connect', async () => {
+    const hosts = await start();
+    const r = await post('/api/hosts/mac/connect', {});
+    expect(r.status).toBe(200);
+    expect(hosts.link('mac').state).toBe('up');
+    await post('/api/hosts/mac/disconnect', {});
+    expect(hosts.link('mac').state).toBe('down');
+  });
+  test('connect on an unknown host → 404', async () => {
+    await start();
+    expect((await post('/api/hosts/nope/connect', {})).status).toBe(404);
+  });
+  test('GET /api/hosts/mac/check returns a list of checks', async () => {
+    const hosts = await start();
+    await hosts.link('mac').connect();
+    const j = await (await fetch(`${b2}/api/hosts/mac/check`, { headers: auth })).json() as any;
+    expect(Array.isArray(j)).toBe(true);
+    expect(j[0].id).toBe('ssh');
+  });
+  test('GET /api/hosts/import reads ~/.ssh/config; a missing file gives []', async () => {
+    await start();
+    const home = mkdtempSync(join(tmpdir(), 'ac-home-'));
+    const old = process.env.HOME; process.env.HOME = home;
+    try {
+      expect(await (await fetch(`${b2}/api/hosts/import`, { headers: auth })).json()).toEqual([]);
+      mkdirSync(join(home, '.ssh'));
+      writeFileSync(join(home, '.ssh', 'config'), 'Host box\n  Port 2200\n');
+      expect(await (await fetch(`${b2}/api/hosts/import`, { headers: auth })).json()).toEqual([{ id: 'box', name: 'box', ssh: 'box', port: 2200, roots: [] }]);
+    } finally { process.env.HOME = old; }
+  });
+  test('a host state change reaches the state socket as a host event', async () => {
+    await start();
+    const msgs: any[] = [];
+    const ws = new WebSocket(`ws://127.0.0.1:${s2.port}/ws/state?token=${TOKEN}`);
+    ws.onmessage = e => msgs.push(JSON.parse(String(e.data)));
+    await new Promise(r => { ws.onopen = r; });
+    await post('/api/hosts/mac/connect', {});
+    await new Promise(r => setTimeout(r, 100));
+    ws.close();
+    const ev = msgs.filter(m => m.t === 'host');
+    expect(ev.length).toBeGreaterThan(0);
+    expect(ev.at(-1)).toMatchObject({ t: 'host', id: 'mac', state: 'up' });
+  });
+  test('GET /api/branches?host= with no path → 404 no such folder', async () => {
+    await start();
+    await post('/api/hosts/mac/connect', {});
+    const r = await fetch(`${b2}/api/branches?host=mac`, { headers: auth });
+    expect(r.status).toBe(404);
+    expect(await r.json()).toEqual({ error: 'no such folder' });
   });
 });

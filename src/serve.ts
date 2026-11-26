@@ -6,6 +6,8 @@ import { ADVISOR_PROMPT, REVIEWER_PROMPT, ensureAdvisor } from './advisor';
 import { Digest } from './digest';
 import { uiCommand } from './appwindow';
 import { withUserBins } from './paths';
+import { HostPool, TmuxPool } from './hostpool';
+import { defaultSockDir } from './ssh';
 
 /** How hooks and MCP call back into this program: the compiled binary, or bun + this source file. */
 export function selfCommand(): string[] {
@@ -21,10 +23,13 @@ export async function serve(args: string[]): Promise<number> {
   const token = getToken();
   const tmux = new Tmux(process.env.AC_TMUX_SOCKET ?? 'agent-console');
   const url = `http://127.0.0.1:${port}`;
-  const reg = new Registry(tmux, cfg, { bin: selfCommand(), url, token, advisorPrompt: ADVISOR_PROMPT, reviewerPrompt: REVIEWER_PROMPT });
+  const hosts = new HostPool(cfg.hosts ?? [], { consolePort: port, sockDir: defaultSockDir() });
+  const pool = new TmuxPool(tmux, hosts);
+  const reg = new Registry(pool, cfg, { hosts, bin: selfCommand(), url, token, advisorPrompt: ADVISOR_PROMPT, reviewerPrompt: REVIEWER_PROMPT });
   await reg.discover();
   await tmux.configure(); // sessions from before a restart get the current options too
-  const server = startServer({ reg, cfg, token, port, tmux });
+  const server = startServer({ reg, cfg, token, port, tmux, pool, hosts });
+  hosts.connectAuto().catch(e => console.error(`host connect: ${(e as Error).message}`));
   try { await ensureAdvisor(reg, cfg); } catch (e) { console.error(`advisor did not start: ${(e as Error).message}`); }
 
   const open = `${url}/?token=${token}`;
@@ -44,7 +49,12 @@ export async function serve(args: string[]): Promise<number> {
   const digestTimer = cfg.advisorDigestMin > 0
     ? setInterval(() => { void digest.tick().catch(e => console.error(`status check: ${(e as Error).message}`)); }, cfg.advisorDigestMin * 60_000)
     : undefined;
-  const shutdown = () => { clearInterval(poll); clearInterval(digestTimer); reg.flush(); server.stop(true); process.exit(0); };
+  const shutdown = () => {
+    clearInterval(poll); clearInterval(digestTimer);
+    // Close the ssh links first, but wait at most 3 s.
+    const links = Promise.allSettled(hosts.all().map(l => l.disconnect()));
+    void Promise.race([links, Bun.sleep(3000)]).finally(() => { reg.flush(); server.stop(true); process.exit(0); });
+  };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
   return 0;

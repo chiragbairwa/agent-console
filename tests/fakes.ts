@@ -1,3 +1,4 @@
+import type { ExecResult } from '../src/ssh';
 import type { Tmux } from '../src/tmux';
 
 /** Records tmux calls; holds a set of "live" sessions. Test utility only. */
@@ -18,4 +19,26 @@ export class FakeTmux {
   attachArgs(_n: string) { return ['sleep', '30']; }
   of(fn: string) { return this.calls.filter(c => c.fn === fn); }
   asTmux() { return this as unknown as Tmux; }
+}
+
+/** Stands in for a spawner. Records each cmd. A rule matches when its words
+ *  appear in the cmd in the same order. The first matching rule wins.
+ *  With no match it returns code 0 and empty output. Test utility only. */
+export class FakeRunner {
+  cmds: string[][] = [];
+  stdins: (string | undefined)[] = [];
+  private rules: { words: string[]; res: ExecResult }[] = [];
+  on(words: string[], res: Partial<ExecResult>) {
+    this.rules.push({ words, res: { out: '', err: '', code: 0, ...res } });
+    return this;
+  }
+  spawn = async (cmd: string[], stdin?: string): Promise<ExecResult> => {
+    this.cmds.push(cmd); this.stdins.push(stdin);
+    for (const r of this.rules) {
+      let i = 0;
+      for (const c of cmd) if (c === r.words[i]) i++;
+      if (i === r.words.length) return r.res;
+    }
+    return { out: '', err: '', code: 0 };
+  };
 }

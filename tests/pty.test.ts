@@ -89,3 +89,15 @@ describe.skipIf(!hasTmux)('PtyHub', () => {
     hub.closeAll();
   });
 });
+
+describe('PtyHub attach function', () => {
+  test('uses the attach function of the worker host', async () => {
+    const seen: string[] = [];
+    const hub = new PtyHub((id: string) => { seen.push(id); return ['sleep', '30']; });
+    const a = new Collect();
+    await hub.subscribe('w9', a);
+    expect(seen).toEqual(['w9']);
+    expect(hub.active('w9')).toBe(true);
+    hub.closeAll();
+  });
+});
