@@ -6,105 +6,135 @@ A local web canvas for Claude Code. Each box is a live terminal with `claude` ru
 - The work continues when you close the browser or stop the server. The sessions live in tmux.
 - Push, deploy and gate-approval commands wait for your **Allow** or **Deny** in the browser.
 
-## Install
+## Install the app
+
+Download the app from the [latest release](https://github.com/chiragbairwa/agent-console/releases/latest). You do not need to build it. To build it yourself, see [Build from source](#build-from-source).
+
+### What you need first
+
+- **tmux.** The sessions run in tmux.
+- **Claude Code.** Install it and log in one time. Run `claude` in a terminal and follow the login steps.
+- **Codex** is optional. You need it only for Codex workers.
+
+### Linux: AppImage (any distribution)
+
+1. Install tmux:
+
+   ```bash
+   sudo apt install tmux        # Debian, Ubuntu
+   sudo dnf install tmux        # Fedora
+   sudo pacman -S tmux          # Arch
+   ```
+
+2. Download `AgentConsole-<version>-x86_64.AppImage` from the [latest release](https://github.com/chiragbairwa/agent-console/releases/latest).
+3. Make the file executable:
+
+   ```bash
+   chmod +x ~/Downloads/AgentConsole-*-x86_64.AppImage
+   ```
+
+4. Start it. Double-click the file, or run it from a terminal:
+
+   ```bash
+   ~/Downloads/AgentConsole-*-x86_64.AppImage
+   ```
+
+The AppImage has the `agent-console` command inside. To use that command in a terminal, install the `.deb` or the CLI archive instead.
+
+### Debian or Ubuntu: .deb package
+
+1. Install tmux:
+
+   ```bash
+   sudo apt install tmux
+   ```
+
+2. Download `agent-console_<version>_amd64.deb` from the [latest release](https://github.com/chiragbairwa/agent-console/releases/latest).
+3. Install it. Replace `<version>` with the version of the file:
+
+   ```bash
+   sudo apt install ~/Downloads/agent-console_<version>_amd64.deb
+   ```
+
+4. Start **Agent Console** from the app menu. Or run `agent-console` in a terminal.
+
+The package installs the `agent-console` command and the desktop app.
+
+### macOS (Apple silicon): .dmg and the CLI
+
+The desktop app needs the `agent-console` command. Thus install both.
+
+1. Install tmux with [Homebrew](https://brew.sh):
+
+   ```bash
+   brew install tmux
+   ```
+
+2. Download two files from the [latest release](https://github.com/chiragbairwa/agent-console/releases/latest):
+   - `AgentConsole-<version>-macos-arm64.dmg` (the app)
+   - `agent-console-darwin-arm64.tar.gz` (the command)
+3. Open the `.dmg`. Drag **Agent Console** to **Applications**.
+4. The app is not signed with an Apple Developer ID. Thus macOS blocks it after a browser download. Run this command one time:
+
+   ```bash
+   xattr -dr com.apple.quarantine "/Applications/Agent Console.app"
+   ```
+
+5. Install the command in `~/.local/bin`:
+
+   ```bash
+   mkdir -p ~/.local/bin
+   tar -xzf ~/Downloads/agent-console-darwin-arm64.tar.gz -C ~/.local/bin
+   chmod 755 ~/.local/bin/agent-console
+   ```
+
+6. Your repositories can be in Desktop, Documents or Downloads. Then give the app access to these folders. Open System Settings → Privacy & Security → **Full Disk Access**. Click **+**, choose **/Applications/Agent Console.app** and turn it on. You do not need this step for repositories in other folders, for example `~/code`.
+7. Open **Agent Console** from Applications.
+
+**Intel Mac:** there is no `.dmg` for Intel. Use `agent-console-darwin-x64.tar.gz` in step 5, then run `agent-console` in a terminal. The console opens in your browser.
+
+### Windows
+
+The sessions run in tmux, and tmux is not a Windows program. Install [WSL](https://learn.microsoft.com/windows/wsl/install) with Ubuntu. Then follow the Debian or Ubuntu steps inside WSL.
+
+### Check a download
+
+The release has a `SHA256SUMS` file. Put it in the same folder as your download, then run:
 
 ```bash
-sudo apt install tmux        # the only other program you need (Claude Code must be installed)
-bun install
-bun run install-bin          # builds dist/agent-console and copies it to ~/.local/bin
-agent-console doctor         # checks tmux, claude, the config folder and the port
+sha256sum -c SHA256SUMS --ignore-missing     # Linux
+shasum -a 256 -c SHA256SUMS --ignore-missing # macOS
 ```
 
-## Download a release
+## First start
 
-The [Releases](https://github.com/chiragbairwa/agent-console/releases) page has the files for each version. The release notes list each file.
-
-- **Debian or Ubuntu:** `sudo apt install ./agent-console_<version>_amd64.deb`. It installs the `agent-console` command and the desktop app.
-- **Other Linux:** download the `.AppImage`, run `chmod +x` on it, then start it. It has the CLI inside.
-- **macOS and Windows:** the desktop app, and the CLI as `agent-console-<os>-<arch>` archives.
-- Check a download with `sha256sum -c SHA256SUMS --ignore-missing`.
-
-## Install on macOS
-
-> **Note:** Agent Console is not tested on macOS yet. If a step fails, send the output of `agent-console doctor` to the team.
-
-1. Install tmux and git with Homebrew:
-
-   ```bash
-   brew install tmux git
-   ```
-
-2. Install Bun. Then open a new terminal.
-
-   ```bash
-   curl -fsSL https://bun.sh/install | bash
-   ```
-
-3. Install Claude Code and log in. Codex is optional. You need it only for Codex workers.
-4. Clone the repository from the bundle file. Replace `<bundle-file>` with the path to the file that you received.
-
-   ```bash
-   git clone <bundle-file> agent-console
-   cd agent-console
-   bun install
-   ```
-
-5. Build the executable file and copy it to `~/.local/bin`:
-
-   ```bash
-   mkdir -p ~/.local/bin && bun run install-bin
-   ```
-
-6. Make sure that `~/.local/bin` is on your `PATH`. The default macOS shell is zsh, so add this line to `~/.zprofile`. Then open a new terminal.
-
-   ```bash
-   export PATH="$HOME/.local/bin:$PATH"
-   ```
-
-7. Check the setup:
-
-   ```bash
-   agent-console doctor
-   ```
-
-8. Start the console:
-
-   ```bash
-   agent-console
-   ```
-
-9. Set `roots` and `advisorCwd` in `~/.config/agent-console/config.json`. Use the folders that hold your repositories. See [Config](#config).
+1. Start the app. The console starts its server and opens its window.
+2. The **Advisor** box starts a Claude session. Talk to it in the command bar at the bottom.
+3. Tell the console where your repositories are. Set `roots` and `advisorCwd` in `~/.config/agent-console/config.json`. Then restart the app. See [Config](#config).
 
    ```json
    {
-     "roots": ["/Users/you/code"],
-     "advisorCwd": "/Users/you/code"
+     "roots": ["/home/you/code"],
+     "advisorCwd": "/home/you/code"
    }
    ```
 
-10. Add the console to your apps. `agent-console install-launcher` is for Linux only. On macOS, open the console in Chrome and use the Chrome menu: **Install Agent Console**.
+4. If something does not work, run `agent-console doctor` in a terminal. It checks tmux, claude, the config folder and the port.
 
-**Desktop app (optional):** download it from the [latest release](https://github.com/chiragbairwa/agent-console/releases/latest), or build it on the Mac. The first command makes the app icon (`assets/icon.iconset`) with `sips`.
+## Troubleshooting
 
-```bash
-cd desktop && sh scripts/mac-iconset.sh && npx -y electrobun@2.0.7 build --env=stable
-```
+**macOS says that the app "cannot be opened" or that it is "damaged":** do step 4 of the macOS install. The app is not signed with an Apple Developer ID.
 
-The build writes the app to `desktop/artifacts/`.
+**A session stops at once and its box shows "macOS blocks access to …":** macOS protects the Desktop, Documents and Downloads folders. Give Agent Console access in System Settings → Privacy & Security → Full Disk Access (step 6 of the macOS install). Another option is to keep your repositories outside these folders. On macOS, `agent-console doctor` shows a warning when it cannot read a folder in `roots` or `advisorCwd`. When you run `agent-console doctor` from Terminal, it uses the permissions of Terminal. Thus it can say that a folder is readable while the app is blocked.
 
-**The app does not open after a download:** the desktop app in the `.dmg` is not signed with an Apple Developer ID. Thus macOS blocks it after a browser download. macOS says that the app "cannot be opened" or that it is "damaged". Copy the app to Applications. Then run this command one time:
+**A box shows "claude not found on PATH":** Claude Code that you install with nvm, fnm, volta or asdf is on the `PATH` of your shell profile only. Since v0.5.1 the console reads the `PATH` of your login shell. If `claude` is still not found, link it into `~/.local/bin`:
 
 ```bash
-xattr -dr com.apple.quarantine "/Applications/Agent Console.app"
-```
-
-**Folder access:** macOS protects the Desktop, Documents and Downloads folders. When the console starts from the app or from a background service, it needs your permission for these folders. Without it, a session in these folders stops at once. Give Agent Console access in System Settings → Privacy & Security → Files and Folders, or in Full Disk Access. Another option is to keep your repositories outside these folders. On macOS, `agent-console doctor` shows a warning when it cannot read a folder in `roots` or `advisorCwd`. When you run `agent-console doctor` from Terminal, it uses the permissions of Terminal. Thus it can say that a folder is readable while the app is blocked.
-
-**Claude not found:** Claude Code that you install with nvm, fnm, volta or asdf is on the `PATH` of your shell profile only. An app that starts from the Dock or the app menu does not read that profile. Since v0.5.1 the console also reads the `PATH` of your login shell. If `claude` is still not found, start the console one time from a terminal. Or link `claude` into `~/.local/bin`:
-
-```bash
+mkdir -p ~/.local/bin
 ln -s "$(command -v claude)" ~/.local/bin/claude
 ```
+
+**A box shows "… exited right after start":** run the same agent in a terminal in that folder to see the error. For example, run `claude` in the repository folder.
 
 ## Use
 
@@ -295,6 +325,74 @@ The remote workers keep running in tmux. Their boxes show `Host offline`. The co
 - **Queued messages are kept in memory only.** A server restart drops them.
 - **Messages are one line.** Line breaks and control characters in advisor and worker messages become spaces or are removed.
 - Linux only.
+
+## Build from source
+
+Do this only when you want to change the code, or when there is no download for your system. You need [Bun](https://bun.sh), git, tmux and Claude Code.
+
+### Linux
+
+1. Install tmux and Bun. Then open a new terminal.
+
+   ```bash
+   sudo apt install tmux git
+   curl -fsSL https://bun.sh/install | bash
+   ```
+
+2. Get the code and build the command. `install-bin` copies it to `~/.local/bin`:
+
+   ```bash
+   git clone https://github.com/chiragbairwa/agent-console.git
+   cd agent-console
+   bun install
+   mkdir -p ~/.local/bin && bun run install-bin
+   ```
+
+3. Check the setup and start the console:
+
+   ```bash
+   agent-console doctor
+   agent-console
+   ```
+
+4. Optional: add **Agent Console** to the app menu with `agent-console install-launcher`.
+
+### macOS
+
+1. Install tmux and git with Homebrew, then install Bun. Then open a new terminal.
+
+   ```bash
+   brew install tmux git
+   curl -fsSL https://bun.sh/install | bash
+   ```
+
+2. Get the code and build the command:
+
+   ```bash
+   git clone https://github.com/chiragbairwa/agent-console.git
+   cd agent-console
+   bun install
+   mkdir -p ~/.local/bin && bun run install-bin
+   ```
+
+3. Make sure that `~/.local/bin` is on your `PATH`. The default macOS shell is zsh, so add this line to `~/.zprofile`. Then open a new terminal.
+
+   ```bash
+   export PATH="$HOME/.local/bin:$PATH"
+   ```
+
+4. Check the setup and start the console:
+
+   ```bash
+   agent-console doctor
+   agent-console
+   ```
+
+5. Optional: build the desktop app. The first command makes the app icon (`assets/icon.iconset`) with `sips`. The build writes the app to `desktop/artifacts/`.
+
+   ```bash
+   cd desktop && sh scripts/mac-iconset.sh && npx -y electrobun@2.0.7 build --env=stable
+   ```
 
 ## Develop
 
