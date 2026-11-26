@@ -3,6 +3,8 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BASH_FAILSAFE, CURL_POST, sessionFiles } from '../src/sessionfiles';
+import { projectSlug } from '../src/agents/claude';
+import { homedir } from 'node:os';
 import { loadConfig } from '../src/store';
 import type { Worker } from '../src/types';
 
@@ -111,8 +113,8 @@ describe('sessionFiles', () => {
     expect(r.args[r.args.indexOf('--append-system-prompt') + 1]).toBe('REV');
   });
 
-  test('resume uses the known session id, else --continue', () => {
-    expect(sessionFiles(worker({ sessionId: 'abc' }), loadConfig(), { ...base, resume: true }).args).toContain('abc');
+  test('resume uses the known session id when its transcript exists, else --continue', () => {
+    expect(sessionFiles(worker({ sessionId: 'abc' }), loadConfig(), { ...base, resume: true, hasTranscript: () => true }).args).toContain('abc');
     expect(sessionFiles(worker(), loadConfig(), { ...base, resume: true }).args).toContain('--continue');
   });
 
@@ -128,5 +130,63 @@ describe('sessionFiles fileDir', () => {
     expect(sf.args.slice(0, 4)).toEqual(['--settings', '/Users/me/.config/agent-console/sessions/nova/settings.json',
       '--mcp-config', '/Users/me/.config/agent-console/sessions/nova/mcp.json']);
     expect(readFileSync(sf.settingsPath, 'utf8')).toContain('hooks');
+  });
+});
+
+describe('resume of a session with no transcript', () => {
+  const { findTranscript, claudeConfigDir } = require('../src/agents/claude') as typeof import('../src/agents/claude');
+  const { mkdirSync, writeFileSync } = require('node:fs') as typeof import('node:fs');
+  const mkBase = () => {
+    const b = mkdtempSync(join(tmpdir(), 'ac-cc-'));
+    mkdirSync(join(b, 'projects', '-r-Acme-Nova'), { recursive: true });
+    mkdirSync(join(b, 'projects', '-private-tmp-other'), { recursive: true });
+    return b;
+  };
+
+  test('projectSlug replaces each character that is not a letter or a digit with "-"', () => {
+    expect(projectSlug('/home/a/b.c')).toBe('-home-a-b-c');
+  });
+
+  test('claudeConfigDir honours CLAUDE_CONFIG_DIR, else ~/.claude', () => {
+    expect(claudeConfigDir({ CLAUDE_CONFIG_DIR: '/cc' })).toBe('/cc');
+    expect(claudeConfigDir({})).toBe(join(homedir(), '.claude'));
+  });
+
+  test('findTranscript finds <id>.jsonl in any project folder (a symlinked or shortened cwd gives another name)', () => {
+    const b = mkBase();
+    writeFileSync(join(b, 'projects', '-private-tmp-other', 'abc.jsonl'), '{}\n');
+    expect(findTranscript('abc', { base: b })).toBe(join(b, 'projects', '-private-tmp-other', 'abc.jsonl'));
+    expect(findTranscript('zzz', { base: b })).toBeNull();
+    expect(findTranscript('../x', { base: b })).toBeNull();
+    expect(findTranscript('abc', { base: join(b, 'missing') })).toBeNull();
+  });
+
+  test('the default check uses CLAUDE_CONFIG_DIR', () => {
+    const b = mkBase();
+    writeFileSync(join(b, 'projects', '-r-Acme-Nova', 'abc.jsonl'), '{}\n');
+    const old = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = b;
+    try {
+      const args = sessionFiles(worker({ sessionId: 'abc' }), loadConfig(), { ...base, resume: true }).args;
+      expect(args.slice(args.indexOf('--resume'), args.indexOf('--resume') + 2)).toEqual(['--resume', 'abc']);
+      const fresh = sessionFiles(worker({ sessionId: 'nope' }), loadConfig(), { ...base, resume: true }).args;
+      expect(fresh).not.toContain('--resume');
+      expect(fresh).not.toContain('--continue');
+    } finally { if (old === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = old; }
+  });
+
+  test('an injected check: a transcript resumes, none starts fresh', () => {
+    let asked = '';
+    const args = sessionFiles(worker({ sessionId: 'abc' }), loadConfig(), { ...base, resume: true, hasTranscript: id => { asked = id; return true; } }).args;
+    expect(args).toContain('--resume');
+    expect(asked).toBe('abc');
+    const fresh = sessionFiles(worker({ sessionId: 'abc' }), loadConfig(), { ...base, resume: true, hasTranscript: () => false }).args;
+    expect(fresh).not.toContain('--resume');
+    expect(fresh).not.toContain('--continue');
+  });
+
+  test('a remote worker keeps --resume (its transcript is on the host)', () => {
+    const args = sessionFiles(worker({ sessionId: 'abc', host: 'mac' }), loadConfig(), { ...base, resume: true, fileDir: '/Users/me/x', hasTranscript: () => false }).args;
+    expect(args).toContain('--resume');
   });
 });

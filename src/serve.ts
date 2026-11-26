@@ -5,7 +5,7 @@ import { startServer } from './server';
 import { ADVISOR_PROMPT, REVIEWER_PROMPT, ensureAdvisor } from './advisor';
 import { Digest } from './digest';
 import { uiCommand } from './appwindow';
-import { withUserBins } from './paths';
+import { serverPath } from './paths';
 import { HostPool, TmuxPool } from './hostpool';
 import { defaultSockDir } from './ssh';
 
@@ -16,8 +16,9 @@ export function selfCommand(): string[] {
 }
 
 export async function serve(args: string[]): Promise<number> {
-  // tmux, claude and the hooks inherit this PATH (see withUserBins).
-  if (process.platform !== 'win32') process.env.PATH = withUserBins(process.env.PATH ?? '');
+  // tmux, claude and the hooks inherit this PATH (see withUserBins and loginShellPath).
+  // Do this before anything spawns: a launcher start has no PATH from the shell profile.
+  if (process.platform !== 'win32') process.env.PATH = await serverPath();
   const cfg = loadConfig();
   const port = Number(process.env.AC_PORT ?? cfg.port);
   const token = getToken();

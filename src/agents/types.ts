@@ -44,6 +44,8 @@ export interface LaunchInput {
   inheritedOtelAttrs?: string;
   /** How long the console waits for a guard answer, in seconds. */
   hookTimeoutSec?: number;
+  /** True when the session has a local transcript (resume). Default: a search in the Claude projects folder. */
+  hasTranscript?: (sessionId: string) => boolean;
 }
 
 export interface Launch { cmd: string[]; env: Record<string, string> }

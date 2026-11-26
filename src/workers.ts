@@ -1,9 +1,9 @@
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { loadState, saveState } from './store';
 import { ADAPTERS, adapterOf, validateAgent } from './agents';
-import { sessionDir } from './paths';
+import { folderProblem, sessionDir } from './paths';
 import { addRemoteWorktree, writeRemoteFile } from './remotefs';
 import type { AgentAdapter } from './agents/types';
 import { slugify, uniqueId } from './slug';
@@ -36,7 +36,22 @@ export interface RegistryOpts {
   ancestors?: number[];
   procStartOf?: (pid: number) => string | undefined;
   cmdlineOf?: (pid: number) => string;
+  /** Finds an agent binary on PATH. Default: Bun.which with the PATH of the process. */
+  which?: (bin: string) => string | null;
+  /** How long a local start waits before it checks that the session still runs. Default 1500 ms. */
+  startCheckMs?: number;
+  /** True when a session has a local transcript, for resume. Default: a search in the Claude projects folder. */
+  transcriptExists?: (sessionId: string) => boolean;
+  /** Reads a working folder before a local start. Default: readdirSync. */
+  readDir?: (path: string) => unknown;
+  /** The OS for the folder message. Default: process.platform. */
+  platform?: NodeJS.Platform;
+  /** The wait of the start check. Default: Bun.sleep. */
+  sleep?: (ms: number) => Promise<void>;
 }
+
+/** A local session did not start: the agent binary is missing, or the session ended at once. */
+export class StartError extends Error {}
 
 export interface SpawnInput {
   name: string; repo: string; role?: Role; worktree?: { branch: string; base?: string; existing?: boolean };
@@ -166,8 +181,11 @@ export class Registry extends EventTarget {
     return link;
   }
 
-  /** Start the tmux session of a worker with its agent adapter. */
-  private async start(w: Worker, extra: { resume?: boolean; template?: Template } = {}, adapter: AgentAdapter = adapterOf(w)) {
+  /** Start the tmux session of a worker with its agent adapter.
+   *  `beforeSession` runs after the checks and right before the session starts: spawn() registers the worker there,
+   *  so MCP calls and hooks of the new session find it during the start wait. */
+  private async start(w: Worker, extra: { resume?: boolean; template?: Template } = {}, adapter: AgentAdapter = adapterOf(w),
+    beforeSession?: () => void) {
     const { bin, token, inheritedOtelAttrs, advisorPrompt, reviewerPrompt } = this.opts;
     let { url } = this.opts;
     // A remote worker calls the console through the reverse tunnel, and its session files live on the host.
@@ -186,12 +204,47 @@ export class Registry extends EventTarget {
       rules: (w.role === 'advisor' || w.role === 'reviewer') && seatPrompt !== undefined ? (adapter.rules?.(w.role, seatPrompt) ?? seatPrompt) : undefined,
       resume: extra.resume ?? false, template: extra.template,
       options: { ...Object.fromEntries(fromCfg), ...(w.options ?? {}) }, hookTimeoutSec: this.cfg.hookTimeoutSec,
+      hasTranscript: this.opts.transcriptExists,
     });
     if (link && fileDir) {
       for (const f of ['settings.json', 'mcp.json'])
         await writeRemoteFile(link, `${fileDir}/${f}`, readFileSync(join(sessionDir(w.id), f), 'utf8'));
     }
-    await this.pool.of(w.host).newSession(sessionName(w.id), w.cwd, l.env, l.cmd);
+    // A local agent that is not on PATH makes tmux exit at once. Say so, before the session starts.
+    const agentBin = l.cmd[0]!;
+    const local = isLocal(w.host) && w.kind !== 'shell';
+    if (local && !(this.opts.which ?? (b => Bun.which(b, { PATH: process.env.PATH ?? '' })))(agentBin))
+      throw new StartError(`${agentBin} not found on PATH. Install it, or start the console from a login shell. See agent-console doctor.`);
+    // A folder that the agent cannot read makes it exit at once (macOS privacy blocks Desktop for an app).
+    const folder = local ? folderProblem(w.cwd, this.opts.readDir ?? readdirSync, this.opts.platform) : null;
+    if (folder) throw new StartError(folder);
+    beforeSession?.();
+    // A tmux server that survives from an older start (for example a launcher start) keeps its old
+    // global PATH. So a local session gets the PATH of this server. A remote session keeps the host PATH.
+    const env = local && process.env.PATH ? { ...l.env, PATH: process.env.PATH } : l.env;
+    await this.pool.of(w.host).newSession(sessionName(w.id), w.cwd, env, l.cmd);
+    if (!local) return; // A remote check would need one more ssh round trip. The host poll finds a dead session.
+    const wait = this.opts.startCheckMs ?? 1500;
+    if (wait > 0) await (this.opts.sleep ?? Bun.sleep)(wait);
+    if (!(await this.tmuxOf(w.id).has(sessionName(w.id))))
+      throw new StartError(`${w.name} exited right after start. Run the agent in a terminal to see why: ${agentBin} …`);
+  }
+
+  /** Take a worker out of the state again after a failed spawn. Its session did not start. */
+  private unregister(id: string) {
+    this.state.workers = this.state.workers.filter(x => x.id !== id);
+    this.state.links = this.state.links.filter(l => l.a !== id && l.b !== id);
+    this.emit({ t: 'removed', id });
+    this.emit({ t: 'links', links: this.state.links, cut: this.state.cut });
+    this.persist();
+  }
+
+  /** Show a failed start on the card: stopped, with the error as task, and one Activity line. */
+  private startFailed(w: Worker, e: unknown) {
+    const msg = (e as Error).message;
+    w.status = 'stopped'; w.task = msg;
+    this.activity(`${w.name} did not start: ${msg}`);
+    this.touch(w);
   }
 
   /** Start the login shell of a shell box. It gets no console token and no session files. */
@@ -260,9 +313,25 @@ export class Registry extends EventTarget {
     };
     if (input.beforeStart) await input.beforeStart(cwd);
     const template = this.cfg.templates.find(t => t.name === input.template) ?? (input.prompt ? { name: 'prompt', prompt: input.prompt } : undefined);
-    await this.start(w, { resume: input.resume, template });
-    this.state.workers.push(w);
-    if (role === 'worker' && this.get('advisor')) this.connect('advisor', id, 'advisor');
+    let registered = false;
+    const register = () => {
+      if (registered) return;
+      registered = true;
+      this.state.workers.push(w);
+      if (role === 'worker' && this.get('advisor')) this.connect('advisor', id, 'advisor');
+      this.touch(w);
+    };
+    try { await this.start(w, { resume: input.resume, template }, adapterOf(w), register); }
+    catch (e) {
+      // The user removed the card during the start wait: do not bring it back.
+      if (registered && !this.get(id)) throw e;
+      if (e instanceof StartError) {
+        // Keep the card, so the user sees why it did not start and can restart it.
+        register();
+        this.startFailed(w, e);
+      } else if (registered) this.unregister(id);
+      throw e;
+    }
     this.activity(`Started ${w.name} in ${w.repo}${branch ? ` (worktree ${branch}${input.worktree?.base ? ` from ${input.worktree.base}` : ''})` : ''}.`);
     this.touch(w);
     return w;
@@ -291,7 +360,9 @@ export class Registry extends EventTarget {
     }
     const adapter = adapterOf(w);
     await this.tmuxOf(id).kill(sessionName(id));
-    await this.start(w, { resume }, adapter);
+    // The old session is gone now, so any start error leaves the card stopped. The route still gets the error (409).
+    try { await this.start(w, { resume }, adapter); }
+    catch (e) { this.startFailed(w, e); throw e; }
     w.status = 'idle'; w.task = 'Restarted';
     this.activity(`Restarted ${w.name}.`);
     this.touch(w);
@@ -674,7 +745,9 @@ export class Registry extends EventTarget {
     }
     w.kind = 'tmux'; delete w.pid;
     w.status = 'idle'; w.task = 'Moved into the console (resumed)';
-    await this.start(w, { resume: true });
+    // The outside process is gone now, so a start error must not leave an idle card with no session.
+    try { await this.start(w, { resume: true }); }
+    catch (e) { this.startFailed(w, e); throw e; }
     if (this.get('advisor') && !this.linked('advisor', w.id)) this.connect('advisor', w.id, 'advisor');
     this.activity(`Moved ${w.name} into the console.`);
     this.touch(w);

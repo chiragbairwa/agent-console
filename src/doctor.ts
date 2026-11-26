@@ -1,7 +1,7 @@
-import { accessSync, constants, mkdirSync, rmSync } from 'node:fs';
+import { accessSync, constants, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { ADAPTERS } from './agents';
-import { configDir } from './paths';
+import { configDir, folderProblem } from './paths';
 import { checkHost, checkMark, type Check as HostCheck } from './hostcheck';
 import { HostLink } from './ssh';
 import type { Host } from './types';
@@ -33,7 +33,28 @@ async function portFree(port: number): Promise<boolean> {
   }
 }
 
-export async function runDoctor(env: { PATH?: string } = {}, port = 7878): Promise<Check[]> {
+/** True when the program on the port is Agent Console. Without a token the console answers 403 "Forbidden". */
+async function isConsole(port: number, get: (url: string, init?: RequestInit) => Promise<Response>): Promise<boolean> {
+  try {
+    const r = await get(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(1000) });
+    const body = (await r.text()).trim();
+    if (r.status === 403) return body === 'Forbidden';
+    if (r.status === 200) { try { return JSON.parse(body)?.ok === true; } catch { return false; } }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export interface DoctorOpts {
+  fetch?: (url: string, init?: RequestInit) => Promise<Response>;
+  /** The config roots and advisorCwd. macOS only: the doctor checks that it can read them. */
+  folders?: string[];
+  readDir?: (p: string) => unknown;
+  platform?: NodeJS.Platform;
+}
+
+export async function runDoctor(env: { PATH?: string } = {}, port = 7878, o: DoctorOpts = {}): Promise<Check[]> {
   const checks: Check[] = [];
   checks.push({ name: 'bun', ok: true, detail: `bun ${Bun.version}` });
 
@@ -59,8 +80,19 @@ export async function runDoctor(env: { PATH?: string } = {}, port = 7878): Promi
     checks.push({ name: 'config-dir', ok: false, detail: `${dir}: ${(e as Error).message}` });
   }
 
+  // macOS privacy blocks Desktop, Documents and Downloads for an app until the user allows it.
+  if ((o.platform ?? process.platform) === 'darwin' && o.folders?.length) {
+    const problems = [...new Set(o.folders)].map(d => folderProblem(d, o.readDir ?? readdirSync, 'darwin')).filter(Boolean);
+    checks.push(problems.length
+      ? { name: 'folders', ok: true, warn: true, detail: problems.join(' ') }
+      : { name: 'folders', ok: true, detail: 'the roots and advisorCwd are readable' });
+  }
+
   const free = await portFree(port);
-  checks.push({ name: 'port', ok: free, detail: free ? `${port} is free` : `${port} is in use (is agent-console already running?)` });
+  if (free) checks.push({ name: 'port', ok: true, detail: `${port} is free` });
+  else if (await isConsole(port, o.fetch ?? ((url, init) => fetch(url, init))))
+    checks.push({ name: 'port', ok: true, detail: `${port} used by the running Agent Console` });
+  else checks.push({ name: 'port', ok: false, detail: `${port} is in use (is agent-console already running?)` });
   return checks;
 }
 

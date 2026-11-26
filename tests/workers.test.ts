@@ -7,7 +7,7 @@ import { ADAPTERS } from '../src/agents';
 import { ensureAdvisor } from '../src/advisor';
 import { loadConfig, saveState } from '../src/store';
 import type { StateEvent } from '../src/types';
-import { FakeTmux } from './fakes';
+import { FakeTmux, START_OK } from './fakes';
 
 let tmux: FakeTmux;
 let now: number;
@@ -16,7 +16,7 @@ let events: StateEvent[];
 
 function mkReg() {
   const r = new Registry(tmux.asTmux(), loadConfig(), {
-    bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '',
+    bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', ...START_OK,
     now: () => now, exec: async (cmd, cwd) => { execs.push({ cmd, cwd }); },
   });
   r.addEventListener('event', e => events.push((e as CustomEvent<StateEvent>).detail));
@@ -191,13 +191,13 @@ describe('Registry linked sessions', () => {
   const ext = (over: object = {}) => ({ pid: 4242, sessionId: 'sess-1', cwd: '/r/Acme.Atlas', name: 'acme-atlas-3f', status: 'idle', startedAt: 1, ancestor: false, ...over });
 
   let extDir = '';
-  function mkReg2(alive: Set<number>, killed: number[]) {
+  function mkReg2(alive: Set<number>, killed: number[], over: object = {}) {
     extDir = mkdtempSync(join(tmpdir(), 'ac-x-'));
     writeFileSync(join(extDir, '4242.json'), JSON.stringify({ ...ext(), kind: 'interactive', procStart: '1' }));
     const r = new Registry(tmux.asTmux(), loadConfig(), {
-      bin: ['/b'], url: 'u', token: 't', inheritedOtelAttrs: '', now: () => now,
+      bin: ['/b'], url: 'u', token: 't', inheritedOtelAttrs: '', ...START_OK, now: () => now,
       alive: p => alive.has(p), kill: p => { killed.push(p); alive.delete(p); },
-      sessionsDir: extDir, ancestors: [], procStartOf: () => '1', cmdlineOf: () => 'claude',
+      sessionsDir: extDir, ancestors: [], procStartOf: () => '1', cmdlineOf: () => 'claude', ...over,
     });
     r.addEventListener('event', e => events.push((e as CustomEvent<StateEvent>).detail));
     return r;
@@ -225,6 +225,14 @@ describe('Registry linked sessions', () => {
     const cmd = tmux.of('newSession').at(-1)!.args[3] as string[];
     expect(cmd.slice(-2)).toEqual(['--resume', 'sess-1']);
     expect(r.workers().filter(x => x.sessionId === 'sess-1').length).toBe(1);
+  });
+
+  test('adopt with a start error: the card is stopped with the error, not idle "Moved into the console"', async () => {
+    const alive = new Set([4242]); const killed: number[] = [];
+    const r = mkReg2(alive, killed, { which: () => null });
+    const linked = r.link(ext());
+    await expect(r.adopt(ext())).rejects.toThrow('claude not found on PATH');
+    expect(r.get(linked.id)).toMatchObject({ status: 'stopped', task: expect.stringContaining('claude not found on PATH') });
   });
 
   test('adopt refuses a session that runs the console', async () => {
@@ -289,7 +297,7 @@ test('start() with an unknown agent throws and starts nothing', async () => {
 test('start merges config.agents.codex under worker options', async () => {
   process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-reg-'));
   const cfg = { ...loadConfig(), agents: { codex: { model: 'cfg-model', reasoning: 'low', bad: 5 as unknown as string } } };
-  const r = new Registry(tmux.asTmux(), cfg, { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', now: () => now, exec: async () => {} });
+  const r = new Registry(tmux.asTmux(), cfg, { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', ...START_OK, now: () => now, exec: async () => {} });
   await r.spawn({ name: 'Cx', repo: '/r/a', agent: 'codex', options: { reasoning: 'high' } });
   const cmd = tmux.of('newSession')[0]!.args[3] as string[];
   expect(cmd).toContain('model="cfg-model"');
@@ -301,7 +309,7 @@ test('start merges config.agents.codex under worker options', async () => {
 test('spawn uses config.defaultWorkerAgent when the input has no agent', async () => {
   process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-reg-'));
   const cfg = { ...loadConfig(), defaultWorkerAgent: 'codex' };
-  const r = new Registry(tmux.asTmux(), cfg, { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', now: () => now, exec: async () => {} });
+  const r = new Registry(tmux.asTmux(), cfg, { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', ...START_OK, now: () => now, exec: async () => {} });
   const w = await r.spawn({ name: 'Cx', repo: '/r/a' });
   expect(w.agent).toBe('codex');
   expect((tmux.of('newSession')[0]!.args[3] as string[])[0]).toBe('codex');
@@ -310,7 +318,7 @@ test('spawn uses config.defaultWorkerAgent when the input has no agent', async (
 test('defaultWorkerAgent does not apply to the advisor seat', async () => {
   process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-reg-'));
   const cfg = { ...loadConfig(), defaultWorkerAgent: 'codex' };
-  const r = new Registry(tmux.asTmux(), cfg, { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', now: () => now, exec: async () => {} });
+  const r = new Registry(tmux.asTmux(), cfg, { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', ...START_OK, now: () => now, exec: async () => {} });
   const a = await r.spawn({ name: 'Advisor', repo: '/r/a', role: 'advisor' });
   expect(a.agent).toBeUndefined();
   expect((tmux.of('newSession')[0]!.args[3] as string[])[0]).toBe('claude');
@@ -321,7 +329,7 @@ test('defaultWorkerAgent does not apply to the advisor seat', async () => {
 test('start passes hookTimeoutSec to the adapter', async () => {
   process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-reg-'));
   const cfg = { ...loadConfig(), hookTimeoutSec: 900 };
-  const r = new Registry(tmux.asTmux(), cfg, { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', now: () => now, exec: async () => {} });
+  const r = new Registry(tmux.asTmux(), cfg, { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', ...START_OK, now: () => now, exec: async () => {} });
   await r.spawn({ name: 'Cx', repo: '/r/a', agent: 'codex' });
   expect((tmux.of('newSession')[0]!.args[3] as string[]).some(a => a.includes('--max-time 930'))).toBe(true);
 });
@@ -329,7 +337,7 @@ test('start passes hookTimeoutSec to the adapter', async () => {
 test('defaultWorkerAgent codex: options are validated against codex and the worker stores it', async () => {
   process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-reg-'));
   const cfg = { ...loadConfig(), defaultWorkerAgent: 'codex' };
-  const r = new Registry(tmux.asTmux(), cfg, { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', now: () => now, exec: async () => {} });
+  const r = new Registry(tmux.asTmux(), cfg, { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', ...START_OK, now: () => now, exec: async () => {} });
   const w = await r.spawn({ name: 'Cx', repo: '/r/a', options: { reasoning: 'high' } });
   expect(w.agent).toBe('codex');
   expect((tmux.of('newSession')[0]!.args[3] as string[])[0]).toBe('codex');
@@ -338,7 +346,7 @@ test('defaultWorkerAgent codex: options are validated against codex and the work
 test('unknown defaultWorkerAgent: spawn throws before the worktree and the session', async () => {
   process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-reg-'));
   const cfg = { ...loadConfig(), defaultWorkerAgent: 'nope' };
-  const r = new Registry(tmux.asTmux(), cfg, { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', now: () => now, exec: async (cmd, cwd) => { execs.push({ cmd, cwd }); } });
+  const r = new Registry(tmux.asTmux(), cfg, { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', ...START_OK, now: () => now, exec: async (cmd, cwd) => { execs.push({ cmd, cwd }); } });
   await expect(r.spawn({ name: 'X', repo: '/r/a', worktree: { branch: 'fix/x' } })).rejects.toThrow('unknown agent: nope');
   expect(execs.length).toBe(0);
   expect(tmux.of('newSession').length).toBe(0);
@@ -371,7 +379,7 @@ describe('Registry.swapAdvisor', () => {
   const PROMPT = 'RULE one\n- use SendMessage for linked\nRULE two';
   async function mkAdv(): Promise<Registry> {
     process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-reg-'));
-    const r = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', now: () => now, exec: async () => {}, advisorPrompt: PROMPT, swapSettleMs: 0 });
+    const r = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', ...START_OK, now: () => now, exec: async () => {}, advisorPrompt: PROMPT, swapSettleMs: 0 });
     r.addEventListener('event', e => events.push((e as CustomEvent<StateEvent>).detail));
     await r.spawn({ name: 'Advisor', repo: '/r/a', role: 'advisor' });
     return r;
@@ -422,7 +430,7 @@ describe('Registry.swapAdvisor', () => {
 
   test('swap with no advisor throws', async () => {
     process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-reg-'));
-    const r = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '' });
+    const r = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', ...START_OK });
     await expect(r.swapAdvisor('codex')).rejects.toThrow('no advisor');
   });
 
@@ -526,7 +534,7 @@ describe('Registry.swapAdvisor', () => {
     r.update('advisor', { sessionId: 'cx-1' });
     r.flush();
     const t2 = new FakeTmux();
-    const r2 = new Registry(t2.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', now: () => now, exec: async () => {}, advisorPrompt: PROMPT });
+    const r2 = new Registry(t2.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', ...START_OK, now: () => now, exec: async () => {}, advisorPrompt: PROMPT });
     await r2.discover();
     expect(r2.get('advisor')!.status).toBe('stopped');
     await ensureAdvisor(r2, { ...loadConfig(), advisorAgent: 'claude' });
@@ -571,7 +579,7 @@ describe('Registry reviewer seat', () => {
   const REV = 'REVIEWER RULES';
   async function mkSeats(leadAgent = 'claude', revAgent = 'codex'): Promise<Registry> {
     process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-reg-'));
-    const r = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', now: () => now, exec: async () => {}, advisorPrompt: ADV, reviewerPrompt: REV, swapSettleMs: 0 });
+    const r = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', ...START_OK, now: () => now, exec: async () => {}, advisorPrompt: ADV, reviewerPrompt: REV, swapSettleMs: 0 });
     r.addEventListener('event', e => events.push((e as CustomEvent<StateEvent>).detail));
     await r.spawn({ name: 'Advisor', repo: '/r/a', role: 'advisor', agent: leadAgent });
     await r.addReviewer(revAgent);
@@ -595,7 +603,7 @@ describe('Registry reviewer seat', () => {
 
   test('addReviewer uses the width of the lead when it was resized', async () => {
     process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-reg-'));
-    const r = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', exec: async () => {} });
+    const r = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', ...START_OK, exec: async () => {} });
     await r.spawn({ name: 'Advisor', repo: '/r/a', role: 'advisor' });
     r.resize('advisor', 900, 500);
     await r.addReviewer('claude');
@@ -606,7 +614,7 @@ describe('Registry reviewer seat', () => {
     const r = await mkSeats();
     await expect(r.addReviewer('claude')).rejects.toThrow('a reviewer exists');
     process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-reg-'));
-    const r2 = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', exec: async () => {} });
+    const r2 = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', ...START_OK, exec: async () => {} });
     await expect(r2.addReviewer('claude')).rejects.toThrow('no advisor');
     await expect(r.addReviewer('nope')).rejects.toThrow('unknown agent');
     await expect(r.addReviewer('toString')).rejects.toThrow('unknown agent');
@@ -756,7 +764,7 @@ describe('Registry reviewer seat', () => {
 
   test('swapRoles with no reviewer, or while a seat swaps → error, nothing stops (Review Focus 4)', async () => {
     process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-reg-'));
-    const solo = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', exec: async () => {} });
+    const solo = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', ...START_OK, exec: async () => {} });
     await solo.spawn({ name: 'Advisor', repo: '/r/a', role: 'advisor' });
     await expect(solo.swapRoles()).rejects.toThrow('no reviewer');
     expect(tmux.of('kill').length).toBe(0);
@@ -966,7 +974,7 @@ describe('remote hosts', () => {
     };
     hosts = new HostPool([mac, { id: 'off', name: 'Off', ssh: 'off', roots: [] }], { consolePort: 7878, sockDir: '/tmp/ac-reg-ssh', spawn });
     const r = new Registry(new TmuxPool(tmux.asTmux(), hosts), loadConfig(), {
-      bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', now: () => now, exec: async () => {}, hosts, ...over,
+      bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', ...START_OK, now: () => now, exec: async () => {}, hosts, ...over,
     });
     r.addEventListener('event', e => events.push((e as CustomEvent<StateEvent>).detail));
     return r;
@@ -978,6 +986,7 @@ describe('remote hosts', () => {
     expect(w.host).toBe('mac');
     expect(tmux.of('newSession')).toHaveLength(0);
     const c = remoteCmds().find(s => s.includes('new-session'))!;
+    expect(c).not.toContain('PATH=');
     expect(c).toContain("'ac-rem'");
     expect(c).toContain("'/Users/me/code/app'");
     expect(c).toContain('AC_URL=http://127.0.0.1:17878');
@@ -1278,5 +1287,177 @@ describe('remote hosts', () => {
       expect(remoteCmds().some(s => s.includes('kill-session') && s.includes('ac-shell-mac'))).toBe(true);
       expect(r.get('shell-mac')).toBeUndefined();
     });
+  });
+});
+
+describe('Registry start check (missing agent or a session that dies at once)', () => {
+  const NOT_FOUND = 'claude not found on PATH. Install it, or start the console from a login shell. See agent-console doctor.';
+  let found: boolean;
+  function mkChecked(t: FakeTmux = tmux) {
+    const r = new Registry(t.asTmux(), loadConfig(), {
+      bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', now: () => now, exec: async () => {},
+      advisorPrompt: 'P', startCheckMs: 0, which: b => found ? `/usr/bin/${b}` : null, readDir: () => [],
+    });
+    r.addEventListener('event', e => events.push((e as CustomEvent<StateEvent>).detail));
+    return r;
+  }
+  /** A tmux where each new session exits at once. */
+  class DyingTmux extends FakeTmux {
+    override async newSession(name: string, cwd: string, env: Record<string, string>, cmd: string[]) {
+      await super.newSession(name, cwd, env, cmd); this.sessions.delete(name);
+    }
+  }
+  beforeEach(() => { found = true; });
+
+  test('spawn with a missing binary: no session, the card is stopped with the error as task', async () => {
+    found = false;
+    const r = mkChecked();
+    await expect(r.spawn({ name: 'Nova', repo: '/r/n' })).rejects.toThrow(NOT_FOUND);
+    expect(tmux.of('newSession')).toHaveLength(0);
+    expect(r.get('nova')).toMatchObject({ status: 'stopped', task: NOT_FOUND });
+    expect(r.snapshot().state.activity.filter(a => a.text.includes(NOT_FOUND))).toHaveLength(1);
+  });
+
+  test('restart with a missing binary: stopped with the error as task, never a green Restarted', async () => {
+    const r = mkChecked();
+    await r.spawn({ name: 'Nova', repo: '/r/n' });
+    found = false;
+    const before = tmux.of('newSession').length;
+    await expect(r.restart('nova')).rejects.toThrow(NOT_FOUND);
+    expect(tmux.of('newSession')).toHaveLength(before);
+    expect(r.get('nova')).toMatchObject({ status: 'stopped', task: NOT_FOUND });
+    const acts = r.snapshot().state.activity.map(a => a.text);
+    expect(acts.some(a => a.startsWith('Restarted'))).toBe(false);
+    expect(acts.filter(a => a.includes(NOT_FOUND))).toHaveLength(1);
+  });
+
+  test('a session that is gone right after the start: stopped with the error as task', async () => {
+    const t = new DyingTmux();
+    const r = mkChecked(t);
+    await expect(r.spawn({ name: 'Nova', repo: '/r/n' })).rejects.toThrow('Nova exited right after start. Run the agent in a terminal to see why: claude');
+    expect(r.get('nova')!.status).toBe('stopped');
+    expect(r.get('nova')!.task).toStartWith('Nova exited right after start.');
+  });
+
+  test('restart of a session that dies at once: stopped, and the error goes to the caller (409)', async () => {
+    const t = new DyingTmux();
+    const r = mkChecked(t);
+    await r.spawn({ name: 'Nova', repo: '/r/n' }).catch(() => {});
+    await expect(r.restart('nova')).rejects.toThrow('exited right after start');
+    expect(r.get('nova')).toMatchObject({ status: 'stopped' });
+    expect(r.get('nova')!.task).toContain('exited right after start');
+  });
+
+  test('ensureAdvisor with a missing claude: the advisor card is stopped with the error as task', async () => {
+    found = false;
+    const r = mkChecked();
+    await ensureAdvisor(r, loadConfig()).catch(() => {});
+    expect(r.get('advisor')).toMatchObject({ status: 'stopped', task: NOT_FOUND });
+    // The next start (restart path) gives the same visible result.
+    await ensureAdvisor(r, loadConfig()).catch(() => {});
+    expect(r.get('advisor')).toMatchObject({ status: 'stopped', task: NOT_FOUND });
+    expect(r.snapshot().state.activity.some(a => a.text.startsWith('Restarted'))).toBe(false);
+  });
+
+  test('a normal start still ends idle', async () => {
+    const r = mkChecked();
+    const w = await r.spawn({ name: 'Nova', repo: '/r/n' });
+    expect(w.status).toBe('idle');
+    await r.restart('nova');
+    expect(r.get('nova')).toMatchObject({ status: 'idle', task: 'Restarted' });
+  });
+});
+
+describe('Registry start check: the working folder', () => {
+  const errno = (code: string) => () => { throw Object.assign(new Error(code), { code }); };
+  function mk(readDir: (p: string) => unknown, platform: NodeJS.Platform) {
+    return new Registry(tmux.asTmux(), loadConfig(), {
+      bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', now: () => now, exec: async () => {},
+      ...START_OK, readDir, platform,
+    });
+  }
+
+  test('macOS EPERM (privacy block on Desktop): stopped with the System Settings hint, no session', async () => {
+    const r = mk(errno('EPERM'), 'darwin');
+    const msg = 'macOS blocks access to /Users/me/Desktop/app. Give Agent Console access in System Settings → Privacy & Security → Files and Folders (or Full Disk Access), then restart the session.';
+    await expect(r.spawn({ name: 'Nova', repo: '/Users/me/Desktop/app' })).rejects.toThrow(msg);
+    expect(tmux.of('newSession')).toHaveLength(0);
+    expect(r.get('nova')).toMatchObject({ status: 'stopped', task: msg });
+  });
+
+  test('EACCES on Linux: no permission', async () => {
+    const r = mk(errno('EACCES'), 'linux');
+    await expect(r.spawn({ name: 'Nova', repo: '/r/n' })).rejects.toThrow('No permission to read /r/n.');
+    expect(r.get('nova')).toMatchObject({ status: 'stopped', task: 'No permission to read /r/n.' });
+  });
+
+  test('ENOENT: the folder does not exist', async () => {
+    const r = mk(errno('ENOENT'), 'darwin');
+    await r.spawn({ name: 'Nova', repo: '/r/n' }).catch(() => {});
+    expect(r.get('nova')).toMatchObject({ status: 'stopped', task: '/r/n does not exist.' });
+  });
+
+  test('restart in a blocked folder: stopped with the hint, the error goes to the caller', async () => {
+    let block = false;
+    const r = mk(p => { if (block) errno('EPERM')(); return [p]; }, 'darwin');
+    await r.spawn({ name: 'Nova', repo: '/r/n' });
+    block = true;
+    await expect(r.restart('nova')).rejects.toThrow('macOS blocks access to /r/n.');
+    expect(r.get('nova')!.status).toBe('stopped');
+  });
+});
+
+describe('Registry spawn registers the worker before the start wait (C1)', () => {
+  test('during the start wait the worker is known (MCP and hooks find it)', async () => {
+    let seen: unknown = 'not called';
+    const r: Registry = new Registry(tmux.asTmux(), loadConfig(), {
+      bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', exec: async () => {},
+      ...START_OK, startCheckMs: 5, sleep: async () => { seen = r.get('nova'); },
+    });
+    await r.spawn({ name: 'Nova', repo: '/r/n' });
+    expect(seen).toMatchObject({ id: 'nova' });
+  });
+
+  test('a StartError during the wait leaves a stopped card', async () => {
+    const r: Registry = new Registry(tmux.asTmux(), loadConfig(), {
+      bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', exec: async () => {},
+      ...START_OK, startCheckMs: 5, sleep: async () => { tmux.sessions.clear(); },
+    });
+    await expect(r.spawn({ name: 'Nova', repo: '/r/n' })).rejects.toThrow('exited right after start');
+    expect(r.get('nova')!.status).toBe('stopped');
+    expect(r.workers().filter(w => w.id === 'nova')).toHaveLength(1);
+  });
+
+  test('a worker removed during the start wait does not come back as a stopped card', async () => {
+    const seen: StateEvent[] = [];
+    const r: Registry = new Registry(tmux.asTmux(), loadConfig(), {
+      bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', exec: async () => {},
+      ...START_OK, startCheckMs: 5, sleep: async () => { await r.remove('nova'); },
+    });
+    r.addEventListener('event', e => seen.push((e as CustomEvent<StateEvent>).detail));
+    await expect(r.spawn({ name: 'Nova', repo: '/r/n' })).rejects.toThrow();
+    expect(r.get('nova')).toBeUndefined();
+    const removedAt = seen.findIndex(e => e.t === 'removed' && e.id === 'nova');
+    expect(removedAt).toBeGreaterThanOrEqual(0);
+    expect(seen.slice(removedAt).some(e => e.t === 'worker' && e.worker.id === 'nova')).toBe(false);
+  });
+
+  test('another error (tmux fails) removes the worker again', async () => {
+    class BadTmux extends FakeTmux { override async newSession(): Promise<void> { throw new Error('tmux failed'); } }
+    const t = new BadTmux();
+    const r = new Registry(t.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', exec: async () => {}, ...START_OK });
+    r.addEventListener('event', e => events.push((e as CustomEvent<StateEvent>).detail));
+    await expect(r.spawn({ name: 'Nova', repo: '/r/n' })).rejects.toThrow('tmux failed');
+    expect(r.get('nova')).toBeUndefined();
+    expect(events.some(e => e.t === 'removed' && e.id === 'nova')).toBe(true);
+  });
+});
+
+describe('Registry local sessions get the server PATH (M5)', () => {
+  test('a local newSession env has PATH; a tmux server from an older start keeps its old global PATH', async () => {
+    const r = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', exec: async () => {}, ...START_OK });
+    await r.spawn({ name: 'Nova', repo: '/r/n' });
+    const env = tmux.of('newSession')[0]!.args[2] as Record<string, string>;
+    expect(env.PATH).toBe(process.env.PATH!);
   });
 });

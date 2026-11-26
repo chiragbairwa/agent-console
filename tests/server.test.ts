@@ -7,7 +7,7 @@ import { startServer } from '../src/server';
 import { Registry } from '../src/workers';
 import { loadConfig } from '../src/store';
 import type { StateEvent } from '../src/types';
-import { FakeTmux } from './fakes';
+import { FakeTmux, START_OK } from './fakes';
 import { HostPool } from '../src/hostpool';
 
 const TOKEN = 'a'.repeat(64);
@@ -27,7 +27,7 @@ beforeEach(async () => {
   writeFileSync(join(sessionsDir, `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: 'ext-1', cwd: '/r/Acme.Atlas', name: 'atlas-tab', status: 'busy', kind: 'interactive', startedAt: 1, procStart: '1' }));
   const cfg = { ...loadConfig(), roots: [root] };
   tmux = new FakeTmux();
-  reg = new Registry(tmux.asTmux(), cfg, { bin: ['/b'], url: 'u', token: TOKEN, inheritedOtelAttrs: '', sessionsDir, alive: () => true, ancestors: [], procStartOf: () => '1', cmdlineOf: () => 'claude' });
+  reg = new Registry(tmux.asTmux(), cfg, { bin: ['/b'], url: 'u', token: TOKEN, inheritedOtelAttrs: '', ...START_OK, sessionsDir, alive: () => true, ancestors: [], procStartOf: () => '1', cmdlineOf: () => 'claude' });
   await reg.spawn({ name: 'Nova', repo: join(root, 'RepoA') });
   server = startServer({ reg, cfg, token: TOKEN, port: 0, tmux: tmux.asTmux() });
   base = `http://127.0.0.1:${server.port}`;
@@ -588,7 +588,7 @@ describe('host api', () => {
   });
   test('POST /api/hosts/<id>/shell: unknown host is 404, a down host is 409', async () => {
     const hosts = await start();
-    const reg2 = new Registry(tmux.asTmux(), { ...loadConfig(), roots: [] }, { bin: ['/b'], url: 'u', token: TOKEN, inheritedOtelAttrs: '', sessionsDir, alive: () => true, ancestors: [], procStartOf: () => '1', cmdlineOf: () => 'claude', hosts });
+    const reg2 = new Registry(tmux.asTmux(), { ...loadConfig(), roots: [] }, { bin: ['/b'], url: 'u', token: TOKEN, inheritedOtelAttrs: '', ...START_OK, sessionsDir, alive: () => true, ancestors: [], procStartOf: () => '1', cmdlineOf: () => 'claude', hosts });
     s2.stop(true);
     s2 = startServer({ reg: reg2, cfg: { ...loadConfig(), roots: [] }, token: TOKEN, port: 0, tmux: tmux.asTmux(), hosts });
     b2 = `http://127.0.0.1:${s2.port}`;
@@ -607,7 +607,7 @@ describe('host api', () => {
   });
   test('POST /api/workers with a host: no local path check; unknown host 404, down host 409, up host starts', async () => {
     const hosts = await start();
-    const reg2 = new Registry(tmux.asTmux(), { ...loadConfig(), roots: [] }, { bin: ['/b'], url: 'u', token: TOKEN, inheritedOtelAttrs: '', sessionsDir, alive: () => true, ancestors: [], procStartOf: () => '1', cmdlineOf: () => 'claude', hosts });
+    const reg2 = new Registry(tmux.asTmux(), { ...loadConfig(), roots: [] }, { bin: ['/b'], url: 'u', token: TOKEN, inheritedOtelAttrs: '', ...START_OK, sessionsDir, alive: () => true, ancestors: [], procStartOf: () => '1', cmdlineOf: () => 'claude', hosts });
     s2.stop(true);
     s2 = startServer({ reg: reg2, cfg: { ...loadConfig(), roots: [] }, token: TOKEN, port: 0, tmux: tmux.asTmux(), hosts });
     b2 = `http://127.0.0.1:${s2.port}`;
@@ -627,7 +627,7 @@ describe('host api', () => {
   });
   test('stop and remove of a worker on a down host → 409', async () => {
     const hosts = await start();
-    const reg2 = new Registry(tmux.asTmux(), { ...loadConfig(), roots: [] }, { bin: ['/b'], url: 'u', token: TOKEN, inheritedOtelAttrs: '', sessionsDir, alive: () => true, ancestors: [], procStartOf: () => '1', cmdlineOf: () => 'claude', hosts });
+    const reg2 = new Registry(tmux.asTmux(), { ...loadConfig(), roots: [] }, { bin: ['/b'], url: 'u', token: TOKEN, inheritedOtelAttrs: '', ...START_OK, sessionsDir, alive: () => true, ancestors: [], procStartOf: () => '1', cmdlineOf: () => 'claude', hosts });
     s2.stop(true);
     s2 = startServer({ reg: reg2, cfg: { ...loadConfig(), roots: [] }, token: TOKEN, port: 0, tmux: tmux.asTmux(), hosts });
     b2 = `http://127.0.0.1:${s2.port}`;

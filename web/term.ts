@@ -81,6 +81,8 @@ export class BoxTerm {
 
   detach() { const ws = this.ws; this.ws = null; ws?.close(); }
   reconnect() { this.detach(); this.attach(); }
+  /** Paste text as the user would (bracketed paste when the app asks for it). It goes out through onData. */
+  paste(text: string) { if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(TYPING); this.term.paste(text); }
   /** The tab is hidden: stop the stream. On resume the server sends a fresh screen snapshot. */
   pause() { this.paused = true; this.detach(); }
   resume() { this.paused = false; this.attach(); }
@@ -125,6 +127,9 @@ export class FocusTerm {
     };
     this.ws = ws;
   }
+
+  /** Paste text as the user would (bracketed paste when the app asks for it). It goes out through onData. */
+  paste(text: string) { this.send(TYPING); this.term.paste(text); this.term.focus(); }
 
   /** Drop the socket and attach again (for example when the state socket says the server is back). */
   reconnect() {

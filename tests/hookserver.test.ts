@@ -6,7 +6,7 @@ import { handleHook } from '../src/hookserver';
 import { Registry } from '../src/workers';
 import { loadConfig } from '../src/store';
 import type { Config } from '../src/types';
-import { FakeTmux } from './fakes';
+import { FakeTmux, START_OK } from './fakes';
 
 let reg: Registry;
 let cfg: Config;
@@ -16,7 +16,7 @@ beforeEach(async () => {
   process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-hs-'));
   cfg = { ...loadConfig(), hookTimeoutSec: 0.05 };
   tmux = new FakeTmux();
-  reg = new Registry(tmux.asTmux(), cfg, { bin: ['/b'], url: 'u', token: 't', inheritedOtelAttrs: '' });
+  reg = new Registry(tmux.asTmux(), cfg, { bin: ['/b'], url: 'u', token: 't', inheritedOtelAttrs: '', ...START_OK });
   await reg.spawn({ name: 'Nova', repo: '/r/s' });
 });
 

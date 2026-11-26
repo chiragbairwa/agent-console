@@ -1,7 +1,8 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { sessionDir } from '../paths';
+import { isLocal } from '../hosts';
 import { assistantTexts, readNewLines } from '../chatlist';
 import * as St from '../steps';
 import type { Config, Template, Worker } from '../types';
@@ -15,6 +16,41 @@ export interface SessionOpts {
   /** Folder on a remote host. The args name the files there. The files are still written here. */
   fileDir?: string;
   resume?: boolean; template?: Template; advisorPrompt?: string; inheritedOtelAttrs?: string;
+  /** True when the session has a local transcript. Default: findTranscript. */
+  hasTranscript?: (sessionId: string) => boolean;
+}
+
+/** The folder name that Claude Code uses for a project under <config>/projects. */
+export const projectSlug = (cwd: string) => cwd.replace(/[^A-Za-z0-9]/g, '-');
+
+/** The Claude Code config folder: CLAUDE_CONFIG_DIR, else ~/.claude. */
+export const claudeConfigDir = (env: Record<string, string | undefined> = process.env) =>
+  env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+
+/**
+ * The transcript of a local Claude session, or null. Claude writes it only after the first message.
+ * The search looks in every project folder: a symlink (macOS /tmp → /private/tmp) or a long path
+ * that Claude shortens gives a folder name that is not projectSlug(cwd). Session ids are UUIDs.
+ */
+export function findTranscript(sessionId: string, o: { base?: string } = {}): string | null {
+  if (!/^[A-Za-z0-9._-]+$/.test(sessionId) || sessionId.startsWith('.')) return null;
+  const projects = join(o.base ?? claudeConfigDir(), 'projects');
+  let dirs: string[];
+  try { dirs = readdirSync(projects); } catch { return null; }
+  for (const d of dirs) {
+    const p = join(projects, d, `${sessionId}.jsonl`);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+/** The resume args. `claude --resume <id>` exits with "No conversation found" when the session has
+ *  no transcript. Then start fresh: --continue could pick an unrelated conversation in that folder.
+ *  A remote worker keeps --resume, because its transcript is on the host and this check cannot see it. */
+function resumeArgs(w: Worker, has: (sessionId: string) => boolean): string[] {
+  if (!w.sessionId) return ['--continue'];
+  if (isLocal(w.host) && !has(w.sessionId)) return [];
+  return ['--resume', w.sessionId];
 }
 
 export interface SessionFiles { settingsPath: string; mcpPath: string; env: Record<string, string>; args: string[] }
@@ -67,7 +103,7 @@ export function sessionFiles(w: Worker, _cfg: Config, o: SessionOpts): SessionFi
 
   const args = ['--settings', o.fileDir ? `${o.fileDir}/settings.json` : settingsPath, '--mcp-config', o.fileDir ? `${o.fileDir}/mcp.json` : mcpPath];
   if ((w.role === 'advisor' || w.role === 'reviewer') && o.advisorPrompt) args.push('--append-system-prompt', o.advisorPrompt);
-  if (o.resume) args.push(...(w.sessionId ? ['--resume', w.sessionId] : ['--continue']));
+  if (o.resume) args.push(...resumeArgs(w, o.hasTranscript ?? (id => findTranscript(id) !== null)));
   if (o.template?.permissionMode) args.push('--permission-mode', o.template.permissionMode);
   // '--' ends the options, so a prompt that starts with '-' stays text.
   if (o.template?.prompt) args.push('--', o.template.prompt);
@@ -83,7 +119,7 @@ export const claude: AgentAdapter = {
     // sessionFiles() finds the session folder by itself, so `i.dir` is not used here.
     const sf = sessionFiles(i.w, null as unknown as Config, {
       bin: i.bin, url: i.url, token: i.token, resume: i.resume, template: i.template,
-      advisorPrompt: i.rules, inheritedOtelAttrs: i.inheritedOtelAttrs, fileDir: i.fileDir,
+      advisorPrompt: i.rules, inheritedOtelAttrs: i.inheritedOtelAttrs, fileDir: i.fileDir, hasTranscript: i.hasTranscript,
     });
     return { cmd: ['claude', ...sf.args], env: sf.env };
   },

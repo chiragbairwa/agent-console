@@ -6,13 +6,13 @@ import { Digest, DIGEST_TAIL } from '../src/digest';
 import { loadConfig } from '../src/store';
 import { applyTodoWrite } from '../src/steps';
 import { Registry } from '../src/workers';
-import { FakeTmux } from './fakes';
+import { FakeTmux, START_OK } from './fakes';
 
 let reg: Registry, tmux: FakeTmux, now: number;
 beforeEach(async () => {
   process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-dg-'));
   tmux = new FakeTmux(); now = Date.parse('2026-11-20T11:00:00Z');
-  reg = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/b'], url: 'u', token: 't', inheritedOtelAttrs: '', now: () => now });
+  reg = new Registry(tmux.asTmux(), loadConfig(), { bin: ['/b'], url: 'u', token: 't', inheritedOtelAttrs: '', ...START_OK, now: () => now });
   await reg.spawn({ name: 'Advisor', repo: '/r/a', role: 'advisor' });
   await reg.spawn({ name: 'Atlas', repo: '/r/Acme.Atlas' });
 });

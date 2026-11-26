@@ -6,7 +6,7 @@ import { Registry } from '../src/workers';
 import { HostPool, TmuxPool } from '../src/hostpool';
 import { loadConfig } from '../src/store';
 import { sendToHost, sendPreview, defaultRun } from '../src/sendtohost';
-import { FakeTmux } from './fakes';
+import { FakeTmux, START_OK } from './fakes';
 
 let tmux: FakeTmux;
 let remote: { cmd: string; stdin?: string }[];
@@ -49,7 +49,7 @@ async function mkReg(up = true) {
   hosts = new HostPool([{ id: 'mac', name: 'Mac', ssh: 'macmini', roots: ['/Users/me/code'], tunnelPort: 17878 }], { consolePort: 7878, sockDir: '/tmp/ac-send-ssh', spawn });
   if (up) await hosts.link('mac').connect();
   const reg = new Registry(new TmuxPool(tmux.asTmux(), hosts), loadConfig(), {
-    bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', exec: async () => {}, hosts,
+    bin: ['/bin/ac'], url: 'http://x', token: 't', inheritedOtelAttrs: '', ...START_OK, exec: async () => {}, hosts,
   });
   src = mkSource();
   const w = await reg.spawn({ name: 'Src', repo: src });

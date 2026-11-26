@@ -7,7 +7,7 @@ import { ensureAdvisor, ADVISOR_PROMPT } from '../src/advisor';
 import { Registry, linkKey } from '../src/workers';
 import { loadConfig } from '../src/store';
 import type { Config, StateEvent } from '../src/types';
-import { FakeTmux } from './fakes';
+import { FakeTmux, START_OK } from './fakes';
 
 let reg: Registry;
 let tmux: FakeTmux;
@@ -22,7 +22,7 @@ beforeEach(async () => {
   cfg = { ...loadConfig(), roots: [root], advisorCwd: root };
   tmux = new FakeTmux();
   events = [];
-  reg = new Registry(tmux.asTmux(), cfg, { bin: ['/b'], url: 'u', token: 't', inheritedOtelAttrs: '' });
+  reg = new Registry(tmux.asTmux(), cfg, { bin: ['/b'], url: 'u', token: 't', inheritedOtelAttrs: '', ...START_OK });
   reg.addEventListener('event', e => events.push((e as CustomEvent<StateEvent>).detail));
   await reg.spawn({ name: 'Advisor', repo: root, role: 'advisor' });
   await reg.spawn({ name: 'Nova', repo: '/r/s' });
