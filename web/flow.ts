@@ -4,6 +4,13 @@ import type { Step, StepTrack, ToolCall } from '../src/steps';
 /** The flow view: each box shows its steps instead of the terminal, the advisor box and
  *  the KPI strip show the whole fleet, and a hover card shows the tool calls of one step. */
 
+/** The scrollTop that shows an item of height h at offset top in a box of height boxH. It moves as little as possible. */
+export function nearestTop(scrollTop: number, boxH: number, top: number, h: number): number {
+  if (top < scrollTop) return top;
+  if (top + h > scrollTop + boxH) return top + h - boxH;
+  return scrollTop;
+}
+
 export interface FlowSource {
   workers(): Worker[];
   steps(id: string): StepTrack | undefined;
@@ -86,7 +93,12 @@ export class Flow {
     if (this.painted.get(box) === html) return; // nothing changed: keep the scroll and the hover
     this.painted.set(box, html);
     box.innerHTML = html;
-    box.querySelector('.f-step.cur')?.scrollIntoView({ block: 'nearest' });
+    // Scroll only this box. The DOM "scroll into view" call also scrolls #vp, and then the focus view moves up.
+    const cur = box.querySelector<HTMLElement>('.f-step.cur');
+    if (cur) {
+      const top = cur.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop;
+      box.scrollTop = nearestTop(box.scrollTop, box.clientHeight, top, cur.offsetHeight);
+    }
   }
 
   private blocked(w: Worker) { return w.status === 'needs-you' || this.src.needs().some(n => n.id === w.id && n.kind !== 'waiting'); }
