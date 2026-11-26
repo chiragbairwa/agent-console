@@ -86,3 +86,59 @@ describe('hostDoctor (doctor --host)', () => {
     expect(lines).toEqual(['✗ unknown host nope']);
   });
 });
+
+describe('runDoctor port check', () => {
+  const portOf = async (body: string, status: number) => {
+    const s = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response(body, { status }) });
+    return s;
+  };
+  const portCheck = async (port: number, o?: Parameters<typeof runDoctor>[2]) =>
+    (await runDoctor({}, port, o)).find(c => c.name === 'port')!;
+
+  test('a port used by the running Agent Console (403 Forbidden without a token) is ✓', async () => {
+    const s = await portOf('Forbidden', 403);
+    try { expect(await portCheck(s.port!)).toEqual({ name: 'port', ok: true, detail: `${s.port} used by the running Agent Console` }); }
+    finally { s.stop(true); }
+  });
+
+  test('200 {ok:true} from /api/health is the console too; the check asks /api/health', async () => {
+    let asked = '';
+    const fetch = async (url: string) => { asked = url; return new Response(JSON.stringify({ ok: true }), { status: 200 }); };
+    const s = await portOf('x', 500);
+    try {
+      expect((await portCheck(s.port!, { fetch })).ok).toBe(true);
+      expect(asked).toBe(`http://127.0.0.1:${s.port}/api/health`);
+    } finally { s.stop(true); }
+  });
+
+  test('a port used by another program stays ✗', async () => {
+    const s = await portOf('<html>other</html>', 200);
+    try { expect(await portCheck(s.port!)).toEqual({ name: 'port', ok: false, detail: `${s.port} is in use (is agent-console already running?)` }); }
+    finally { s.stop(true); }
+    const fail = async () => { throw new Error('refused'); };
+    const s2 = await portOf('x', 200);
+    try { expect((await portCheck(s2.port!, { fetch: fail })).ok).toBe(false); } finally { s2.stop(true); }
+  });
+});
+
+describe('runDoctor folder access (macOS)', () => {
+  const eperm = (p: string) => { if (p.includes('Desktop')) throw Object.assign(new Error('x'), { code: 'EPERM' }); return []; };
+
+  test('on macOS a blocked root or advisorCwd is a warning with the System Settings hint', async () => {
+    const checks = await runDoctor({}, 1, { platform: 'darwin', folders: ['/Users/me/code', '/Users/me/Desktop/app'], readDir: eperm });
+    expect(checks.find(c => c.name === 'folders')).toEqual({
+      name: 'folders', ok: true, warn: true,
+      detail: 'macOS blocks access to /Users/me/Desktop/app. Give Agent Console access in System Settings → Privacy & Security → Files and Folders (or Full Disk Access), then restart the session.',
+    });
+  });
+
+  test('on macOS readable folders pass', async () => {
+    const checks = await runDoctor({}, 1, { platform: 'darwin', folders: ['/Users/me/code', '/Users/me/code'], readDir: () => [] });
+    expect(checks.find(c => c.name === 'folders')).toEqual({ name: 'folders', ok: true, detail: 'the roots and advisorCwd are readable' });
+  });
+
+  test('on Linux there is no folder check', async () => {
+    const checks = await runDoctor({}, 1, { platform: 'linux', folders: ['/x/Desktop'], readDir: eperm });
+    expect(checks.find(c => c.name === 'folders')).toBeUndefined();
+  });
+});

@@ -6,7 +6,7 @@ import type { Server } from 'bun';
 import { startServer } from '../src/server';
 import { Registry } from '../src/workers';
 import { loadConfig } from '../src/store';
-import { FakeTmux } from './fakes';
+import { FakeTmux, START_OK } from './fakes';
 
 const TOKEN = 'b'.repeat(64);
 let server: Server<unknown>;
@@ -16,7 +16,7 @@ beforeAll(() => {
   process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-web-'));
   const tmux = new FakeTmux();
   const cfg = { ...loadConfig(), templates: [{ name: 'qa', prompt: 'Run QA' }] };
-  const reg = new Registry(tmux.asTmux(), cfg, { bin: ['/b'], url: 'u', token: TOKEN, inheritedOtelAttrs: '' });
+  const reg = new Registry(tmux.asTmux(), cfg, { bin: ['/b'], url: 'u', token: TOKEN, inheritedOtelAttrs: '', ...START_OK });
   server = startServer({ reg, cfg, token: TOKEN, port: 0, tmux: tmux.asTmux() });
   base = `http://127.0.0.1:${server.port}`;
 });

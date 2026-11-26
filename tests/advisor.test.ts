@@ -6,14 +6,14 @@ import { ADVISOR_PROMPT, REVIEWER_PROMPT, advisorPrompt, ensureAdvisor } from '.
 import { ADAPTERS } from '../src/agents';
 import { loadConfig } from '../src/store';
 import { Registry } from '../src/workers';
-import { FakeTmux } from './fakes';
+import { FakeTmux, START_OK } from './fakes';
 
 let tmux: FakeTmux;
 beforeEach(() => {
   process.env.AC_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'ac-adv-'));
   tmux = new FakeTmux();
 });
-const mk = (cfg = loadConfig()) => new Registry(tmux.asTmux(), cfg, { bin: ['/b'], url: 'u', token: 't', inheritedOtelAttrs: '', advisorPrompt: ADVISOR_PROMPT });
+const mk = (cfg = loadConfig()) => new Registry(tmux.asTmux(), cfg, { bin: ['/b'], url: 'u', token: 't', inheritedOtelAttrs: '', ...START_OK, advisorPrompt: ADVISOR_PROMPT });
 
 describe('advisor rules text', () => {
   test('advisor prompt mentions other machines', () => {
@@ -77,7 +77,7 @@ describe('ensureAdvisor', () => {
 });
 
 describe('ensureAdvisor and the reviewer', () => {
-  const rmk = (cfg = loadConfig()) => new Registry(tmux.asTmux(), cfg, { bin: ['/b'], url: 'u', token: 't', inheritedOtelAttrs: '', advisorPrompt: ADVISOR_PROMPT, reviewerPrompt: REVIEWER_PROMPT });
+  const rmk = (cfg = loadConfig()) => new Registry(tmux.asTmux(), cfg, { bin: ['/b'], url: 'u', token: 't', inheritedOtelAttrs: '', ...START_OK, advisorPrompt: ADVISOR_PROMPT, reviewerPrompt: REVIEWER_PROMPT });
 
   test('REVIEWER_PROMPT: read-only, advises the lead, no orders', () => {
     expect(REVIEWER_PROMPT).toContain('REVIEWER');

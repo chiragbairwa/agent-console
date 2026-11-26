@@ -7,6 +7,7 @@ import { Flow } from './flow';
 import { initHosts, type HostInfo } from './hosts';
 import { laneLayout, type Lane } from './lanes';
 import { openSendDialog } from './sendtohost';
+import { pasteText, pathsFromDrop } from './drop';
 
 /** One agent from GET /api/agents. */
 interface AgentOpt { key: string; label: string; kind: 'select' | 'text'; choices?: string[]; default?: string }
@@ -956,6 +957,31 @@ $('#bTheme').onclick = () => {
   applyTheme(theme);
   try { localStorage.setItem('ac.theme', theme); } catch { /* storage blocked */ }
 };
+
+// ---------- drop a file on a terminal ----------
+// As in a real terminal, a dropped file gives its path. Without these handlers the browser or
+// the webview opens the file and leaves the console page. The file content is never uploaded.
+const carriesFiles = (e: DragEvent) => !!e.dataTransfer && [...e.dataTransfer.types].some(t => t === 'Files' || t === 'text/uri-list');
+document.addEventListener('dragover', e => {
+  if (!carriesFiles(e)) return;
+  e.preventDefault();
+  e.dataTransfer!.dropEffect = 'copy';
+});
+document.addEventListener('drop', e => {
+  if (!carriesFiles(e)) return;
+  e.preventDefault();
+  const t = e.target as HTMLElement | null;
+  const node = t?.closest?.('.node') as HTMLElement | null;
+  const target = focus && t?.closest?.('#fTerm') ? focus.term : node ? terms.get(node.dataset.id!) : undefined;
+  if (!target) return;
+  const dt = e.dataTransfer!;
+  const paths = pathsFromDrop({
+    uriList: dt.getData('text/uri-list'), text: dt.getData('text/plain'),
+    files: [...dt.files].map(f => ({ name: f.name, path: (f as File & { path?: unknown }).path as string | undefined })),
+  });
+  if (paths.length) target.paste(pasteText(paths));
+  else feed('The dropped file gave no path. Paste the path by hand.');
+});
 
 // ---------- boot ----------
 // The server serves these two (no bundling): the window name and icon for the app window.

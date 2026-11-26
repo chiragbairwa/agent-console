@@ -44,7 +44,12 @@ export async function main(argv: string[]): Promise<number> {
         const port = Number(process.env.AC_PORT ?? cfg.port ?? 7878);
         return hostDoctor(id, { hosts: cfg.hosts ?? [], port, token: getToken(), sockDir: defaultSockDir() });
       }
-      const checks = await runDoctor();
+      // The same PATH as the server uses, so doctor reports what the server sees.
+      let path = process.env.PATH;
+      if (process.platform !== 'win32') path = await (await import('./paths')).serverPath();
+      const cfg = (await import('./store')).loadConfig();
+      const port = Number(process.env.AC_PORT ?? cfg.port ?? 7878);
+      const checks = await runDoctor({ PATH: path }, port, { folders: [...cfg.roots, cfg.advisorCwd] });
       for (const c of checks) console.log(`${c.warn ? '!' : c.ok ? '✓' : '✗'} ${c.name.padEnd(11)} ${c.detail}`);
       return checks.every(c => c.ok) ? 0 : 1;
     }

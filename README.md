@@ -92,6 +92,20 @@ cd desktop && sh scripts/mac-iconset.sh && npx -y electrobun@2.0.7 build --env=s
 
 The build writes the app to `desktop/artifacts/`.
 
+**The app does not open after a download:** the desktop app in the `.dmg` is not signed with an Apple Developer ID. Thus macOS blocks it after a browser download. macOS says that the app "cannot be opened" or that it is "damaged". Copy the app to Applications. Then run this command one time:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Agent Console.app"
+```
+
+**Folder access:** macOS protects the Desktop, Documents and Downloads folders. When the console starts from the app or from a background service, it needs your permission for these folders. Without it, a session in these folders stops at once. Give Agent Console access in System Settings → Privacy & Security → Files and Folders, or in Full Disk Access. Another option is to keep your repositories outside these folders. On macOS, `agent-console doctor` shows a warning when it cannot read a folder in `roots` or `advisorCwd`. When you run `agent-console doctor` from Terminal, it uses the permissions of Terminal. Thus it can say that a folder is readable while the app is blocked.
+
+**Claude not found:** Claude Code that you install with nvm, fnm, volta or asdf is on the `PATH` of your shell profile only. An app that starts from the Dock or the app menu does not read that profile. Since v0.5.1 the console also reads the `PATH` of your login shell. If `claude` is still not found, start the console one time from a terminal. Or link `claude` into `~/.local/bin`:
+
+```bash
+ln -s "$(command -v claude)" ~/.local/bin/claude
+```
+
 ## Use
 
 ```bash

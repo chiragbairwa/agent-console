@@ -42,3 +42,6 @@ export class FakeRunner {
     return { out: '', err: '', code: 0 };
   };
 }
+
+/** Registry options for tests: no wait after a start, every agent binary is found, every transcript exists, and every folder is readable. */
+export const START_OK = { startCheckMs: 0, which: (b: string) => `/usr/bin/${b}`, transcriptExists: () => true, readDir: () => [] };
