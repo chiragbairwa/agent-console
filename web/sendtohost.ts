@@ -1,6 +1,28 @@
 import type { SendOpts } from '../src/sendtohost';
+import { checkClass, checkMark } from '../src/hostcheck';
 
-export interface Preview { ahead: number; dirtyFiles: number; dirtyLines: number; repoFound: boolean; checks: { id: string; ok: boolean; warn?: boolean; text: string }[] }
+export interface Preview {
+  ahead: number; dirtyFiles: number; dirtyLines: number; repoFound: boolean;
+  checks: { id: string; ok: boolean; warn?: boolean; text: string }[];
+  repo?: string; host?: string; roots?: string[]; agent?: string;
+}
+
+/** Checks that stop a send when they fail, with the check of the worker's own agent binary. Others (login, sleep, roots) only warn: the worker can still start. */
+const BLOCKING = ['ssh', 'tmux', 'tunnel'];
+
+/** The reasons the send cannot start. An empty list means the Send button is on. */
+export function sendBlockers(p: Preview): string[] {
+  const out: string[] = [];
+  if (!p.repoFound) {
+    const repo = p.repo ?? 'The repo', host = p.host ?? 'the host';
+    out.push(p.roots && !p.roots.length ? `${repo} is not on ${host}: the host has no repo folders. Add one in the host profile (Edit).`
+      : p.roots ? `${repo} is not on ${host} under ${p.roots.join(', ')}.` : `${repo} is not on ${host}.`);
+  }
+  for (const c of p.checks) {
+    if (!c.ok && !c.warn && (BLOCKING.includes(c.id) || c.id === p.agent)) out.push(c.text);
+  }
+  return out;
+}
 export interface SendForm { to: string; branch: boolean; patch: boolean; briefOn: boolean; brief: string; folderOn: boolean; folder: string; stopSource: boolean }
 type Body = Omit<SendOpts, 'id'>;
 
@@ -49,7 +71,7 @@ export function openSendDialog(ctx: SendCtx): void {
   const dlg = document.createElement('div'); dlg.id = DIALOG; dlg.className = 'sendDlg';
   document.getElementById('vp')!.appendChild(dlg);
 
-  const checkRows = (p: Preview) => p.checks.map(c => `<div class="hchk ${c.ok ? 'ok' : c.warn ? 'wn' : 'bad'}">${c.ok ? '✓' : c.warn ? '!' : '✗'} ${esc(c.text)}</div>`).join('');
+  const checkRows = (p: Preview) => p.checks.map(c => `<div class="hchk ${checkClass(c)}">${checkMark(c)} ${esc(c.text)}</div>`).join('');
 
   function render() {
     if (!dlg.isConnected) return;
@@ -62,7 +84,9 @@ export function openSendDialog(ctx: SendCtx): void {
         <b>${esc(h.name)}</b><br><span class="meta">${up ? `● online${h.latencyMs !== undefined ? ` · ${esc(h.latencyMs)} ms` : ''}` : esc(h.state === 'down' ? 'offline' : h.state)}</span></button>`;
     }).join('');
     const lines = p ? previewLines(p) : [];
-    const sendOk = !!f.to && !!p && p.repoFound && !running && !steps;
+    const blockers = p ? sendBlockers(p) : [];
+    const sendOk = !!f.to && !!p && !blockers.length && !running && !steps;
+    const why = !f.to ? 'Pick a host.' : !p ? '' : blockers.length ? `Cannot send: ${blockers.join(' ')}` : '';
     dlg.innerHTML = `<h2>Send ${esc(ctx.workerName)} to another host</h2>
       <section><h3 class="cap">Host</h3><div class="sd-hosts">${hostCards}</div></section>
       ${f.to ? `<section><h3 class="cap">What to send</h3>
@@ -81,8 +105,9 @@ export function openSendDialog(ctx: SendCtx): void {
       ${p ? `<section class="sd-checks"><h3 class="cap">Checks on ${esc(hostName())}</h3>
         <div class="hchk ${p.repoFound ? 'ok' : 'bad'}">${p.repoFound ? '✓' : '✗'} ${esc(lines[2])}</div>${checkRows(p)}</section>` : ''}` : ''}
       ${steps ? `<section><h3 class="cap">Result</h3>${steps.map(s => `<div class="hchk ${s.ok ? 'ok' : 'bad'}">${s.ok ? '✓' : '✗'} ${esc(s.text)}</div>`).join('')}</section>` : ''}
+      ${why && !steps && !running ? `<p class="hchk bad sd-why" role="status">${esc(why)}</p>` : ''}
       <div class="imp-foot">${steps ? '<button class="tb" data-close>Close</button>'
-        : `<button class="tb" data-close${running ? ' disabled' : ''}>Cancel</button><button class="send" data-go${sendOk ? '' : ' disabled'}>${running ? 'Sending…' : `Send and Start on ${esc(hostName() || 'Host')}`}</button>`}</div>`;
+        : `<button class="tb" data-close${running ? ' disabled' : ''}>Cancel</button><button class="send" data-go${sendOk ? '' : ` disabled title="${esc(why || 'Wait for the checks.')}"`}>${running ? 'Sending…' : `Send and Start on ${esc(hostName() || 'Host')}`}</button>`}</div>`;
   }
 
   async function pick(id: string) {

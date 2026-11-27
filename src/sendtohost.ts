@@ -95,8 +95,21 @@ export async function sendToHost(reg: Registry, hosts: HostPool, o: SendOpts, de
   if (branch.startsWith('-')) { note('check', false, 'bad branch name'); return { steps }; }
   note('check', true, `${repo} on ${hostName}`);
 
-  // --- bundle: the commits of the branch go over as one Git bundle
+  // --- bundle: the commits of the branch go over as one Git bundle.
+  // With no commits ahead of the base, git refuses an empty bundle. Then the new worker gets a new branch
+  // from the local HEAD commit, which the host repo must already hold.
+  let newBranch: { name: string; base: string } | undefined;
   if (o.branch) {
+    const base = await baseOf(w, run);
+    const n = base ? await run(['git', 'rev-list', '--count', `${base}..${branch}`], w.cwd) : undefined;
+    if (n && n.code === 0 && n.out.trim() === '0') {
+      const head = await run(['git', 'rev-parse', 'HEAD'], w.cwd);
+      if (head.code !== 0) { note('bundle', false, head.err.trim() || 'git rev-parse failed'); return { steps }; }
+      newBranch = { name: `${branch}-${link.host.id}`, base: head.out.trim() };
+      note('bundle', true, 'no commits to send');
+    }
+  }
+  if (o.branch && !newBranch) {
     const tmp = `/tmp/ac-${w.id}-${randomBytes(4).toString('hex')}.bundle`;
     try {
       const base = await baseOf(w, run);
@@ -153,7 +166,7 @@ export async function sendToHost(reg: Registry, hosts: HostPool, o: SendOpts, de
   try {
     nw = await reg.spawn({
       name: `${w.name}-${link.host.id}`, repo, host: link.host.id,
-      worktree: { branch, existing: o.branch }, ...(o.brief ? { prompt: o.brief } : {}), ...(hook ? { beforeStart: hook } : {}),
+      worktree: newBranch ? { branch: newBranch.name, base: newBranch.base } : { branch, existing: o.branch }, ...(o.brief ? { prompt: o.brief } : {}), ...(hook ? { beforeStart: hook } : {}),
     });
     note('start', true, `${nw.name} in ${nw.cwd}`);
   } catch (e) { if (!patchFailed) note('start', false, msg(e)); return { steps }; }
@@ -168,7 +181,7 @@ export async function sendToHost(reg: Registry, hosts: HostPool, o: SendOpts, de
 
 /** What a send would move. Nothing changes. */
 export async function sendPreview(reg: Registry, hosts: HostPool, id: string, to: string, deps: Deps = {}):
-  Promise<{ ahead: number; dirtyFiles: number; dirtyLines: number; repoFound: boolean; checks: Check[] }> {
+  Promise<{ ahead: number; dirtyFiles: number; dirtyLines: number; repoFound: boolean; checks: Check[]; repo: string; host: string; roots: string[]; agent: string }> {
   const run = deps.run ?? defaultRun;
   const w = reg.get(id);
   const link = hosts.link(to);
@@ -188,5 +201,5 @@ export async function sendPreview(reg: Registry, hosts: HostPool, id: string, to
   }
   const repoFound = !!(await findRepo(link, w.repo).catch(() => undefined));
   const checks = await checkHost(link, link.tunnelPort());
-  return { ahead, dirtyFiles, dirtyLines, repoFound, checks };
+  return { ahead, dirtyFiles, dirtyLines, repoFound, checks, repo: w.repo, host: link.host.name, roots: link.host.roots, agent: w.agent ?? 'claude' };
 }

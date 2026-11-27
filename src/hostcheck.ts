@@ -6,7 +6,10 @@ type Res = Omit<Check, 'id'>;
 
 /** ssh runs a command without the login profile, so a PATH set in ~/.zshrc does not apply. */
 const notFound = (bin: string) =>
-  `${bin} not found on the PATH of a non-interactive SSH login. On macOS with Homebrew, add "export PATH=/opt/homebrew/bin:$PATH" to ~/.zshenv on the host.`;
+  `${bin} not found on the PATH of a non-interactive SSH login. Add its folder to ~/.zshenv on the host: "export PATH=$HOME/.local/bin:$PATH" for the native Claude installer, "export PATH=/opt/homebrew/bin:$PATH" for Homebrew on macOS.`;
+
+/** The HTTP codes that prove the console answered: /api/health needs the token, so a call without it gets 401 or 403. */
+const CONSOLE_ANSWERED = ['200', '401', '403'];
 
 /** Run the host checks over the link. A failing check never stops the others. */
 export async function checkHost(link: HostLink, consolePort: number): Promise<Check[]> {
@@ -28,18 +31,22 @@ export async function checkHost(link: HostLink, consolePort: number): Promise<Ch
     const r = await sh(['tmux', '-V']);
     return r.code === 0 ? { ok: true, text: r.out.trim() } : { ok: false, text: notFound('tmux') };
   });
+  let claudeFound = false;
   await run('claude', async () => {
     const r = await sh(['claude', '--version']);
-    return r.code === 0 ? { ok: true, text: r.out.trim() } : { ok: false, text: notFound('claude') };
+    claudeFound = r.code === 0;
+    return claudeFound ? { ok: true, text: r.out.trim() } : { ok: false, text: notFound('claude') };
   });
   await run('login', async () => {
+    // Without the claude binary, "auth status" fails too. Do not report that as a missing login.
+    if (!claudeFound) return { ok: true, warn: true, text: 'The login cannot be checked: claude not found on the host.' };
     const r = await sh(['claude', 'auth', 'status']);
     return r.code === 0 ? { ok: true, text: 'Claude is logged in' }
       : { ok: true, warn: true, text: 'Claude is not logged in. Run "claude login" on the host, or set CLAUDE_CODE_OAUTH_TOKEN there.' };
   });
   await run('tunnel', async () => {
     const r = await sh(['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', `http://127.0.0.1:${link.tunnelPort()}/api/health`]);
-    return r.code === 0 && r.out.trim() === '200' ? { ok: true, text: `tunnel port ${link.tunnelPort()} reaches the console` }
+    return r.code === 0 && CONSOLE_ANSWERED.includes(r.out.trim()) ? { ok: true, text: `tunnel port ${link.tunnelPort()} reaches the console` }
       : { ok: false, text: `The host cannot reach the console through tunnel port ${link.tunnelPort()}` };
   });
   if (os === 'Darwin') await run('sleep', async () => {
@@ -60,3 +67,5 @@ export async function checkHost(link: HostLink, consolePort: number): Promise<Ch
 }
 
 export const checkMark = (c: Check) => c.warn ? '!' : c.ok ? '✓' : '✗';
+/** The CSS class of a check row. A warning is ok=true, so test warn first. */
+export const checkClass = (c: Check) => c.warn ? 'wn' : c.ok ? 'ok' : 'bad';

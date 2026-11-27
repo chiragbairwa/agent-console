@@ -267,3 +267,22 @@ test('folder: a hidden home folder outside the worker folder is still refused', 
     expect(log).toHaveLength(0);
   } finally { rmSync(hidden, { recursive: true, force: true }); }
 });
+
+test('0 commits ahead: no empty bundle; the new worker gets a new branch from the local HEAD commit', async () => {
+  const { reg, w } = await mkReg();
+  git(src, 'update-ref', 'refs/remotes/origin/main', 'feat/x');
+  const head = git(src, 'rev-parse', 'HEAD').trim();
+  const r = await sendToHost(reg, hosts, { ...base, id: w.id }, { run: realRun });
+  expect(r.steps.find(s => s.name === 'bundle')).toEqual({ name: 'bundle', ok: true, text: 'no commits to send' });
+  expect(remote.some(x => x.cmd.includes('openssl'))).toBe(false);
+  const add = remote.find(x => x.cmd.includes("'worktree' 'add'"))!;
+  expect(add.cmd).toContain("'-b' 'feat/x-mac'");
+  expect(add.cmd).toContain(`'${head}'`);
+  expect(r.worker).toBeDefined();
+});
+
+test('sendPreview gives the repo name, host name, roots and agent for the dialog', async () => {
+  const { reg, w } = await mkReg();
+  const p = await sendPreview(reg, hosts, w.id, 'mac');
+  expect(p).toMatchObject({ repo: 'app', host: 'Mac', roots: ['/Users/me/code'], agent: 'claude' });
+});

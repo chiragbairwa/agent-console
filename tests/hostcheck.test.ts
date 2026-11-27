@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { HostLink, type ExecResult } from '../src/ssh';
-import { checkHost, checkMark } from '../src/hostcheck';
+import { checkHost, checkMark, checkClass } from '../src/hostcheck';
 import { runHostDoctor } from '../src/doctor';
 import type { Host } from '../src/types';
 
@@ -81,4 +81,26 @@ test('checkHost: tmux or claude not found names the non-interactive SSH PATH and
     expect(x.text).toContain('export PATH=/opt/homebrew/bin:$PATH');
     expect(x.text).toContain('~/.zshenv');
   }
+});
+test('checkHost: a 401 or 403 from the console means the tunnel works (the health route needs the token)', async () => {
+  for (const code of ['401', '403']) {
+    const t = (await checkHost(await up(link({ ...base, "'curl'": { out: code } })), 7878)).find(x => x.id === 'tunnel')!;
+    expect(t).toMatchObject({ ok: true });
+  }
+  const none = (await checkHost(await up(link({ ...base, "'curl'": { out: '000', code: 7 } })), 7878)).find(x => x.id === 'tunnel')!;
+  expect(none.ok).toBe(false);
+});
+test('checkHost: claude not found gives no false "not logged in"; login is not checked', async () => {
+  const c = await checkHost(await up(link({ ...base, "'--version'": { code: 127 }, "'auth'": { code: 127 } })), 7878);
+  const l = c.find(x => x.id === 'login')!;
+  expect(l).toMatchObject({ ok: true, warn: true });
+  expect(l.text).not.toContain('not logged in');
+  expect(l.text).toContain('claude not found');
+});
+test('checkHost: the PATH hint names ~/.local/bin of the native installer', async () => {
+  const c = await checkHost(await up(link({ ...base, "'--version'": { code: 127 } })), 7878);
+  expect(c.find(x => x.id === 'claude')!.text).toContain('$HOME/.local/bin');
+});
+test('checkClass: a warning is never painted as ok', () => {
+  expect([checkClass({ id: 'a', ok: true, text: '' }), checkClass({ id: 'a', ok: true, warn: true, text: '' }), checkClass({ id: 'a', ok: false, text: '' })]).toEqual(['ok', 'wn', 'bad']);
 });

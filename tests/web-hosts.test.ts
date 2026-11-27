@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { hostRows, profileFromForm } from '../web/hosts';
+import { hostRows, profileFromForm, noChecksText } from '../web/hosts';
 import type { HostInfo } from '../web/hosts';
 
 const h = (o: Partial<HostInfo> & { id: string }): HostInfo => ({ name: o.id, ssh: `${o.id}.lan`, roots: [], state: 'down', ...o });
@@ -53,5 +53,12 @@ describe('profileFromForm', () => {
     const p = profileFromForm({ name: 'x', password: 'secret', privateKey: 'k' });
     expect('password' in p).toBe(false);
     expect('privateKey' in p).toBe(false);
+  });
+});
+
+describe('noChecksText', () => {
+  test('a connected host does not say "Not connected"', () => {
+    expect(noChecksText('up')).toBe('Connected. Use Run Doctor to check the host.');
+    expect(noChecksText('down')).toBe('Not connected. Use Connect or Run Doctor.');
   });
 });

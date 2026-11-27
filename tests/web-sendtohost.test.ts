@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { previewLines, sendBody } from '../web/sendtohost';
+import { previewLines, sendBody, sendBlockers } from '../web/sendtohost';
 
 const pv = (o: object = {}) => ({ ahead: 3, dirtyFiles: 2, dirtyLines: 41, repoFound: true, checks: [], ...o });
 
@@ -24,5 +24,20 @@ describe('sendBody', () => {
   });
   test('empty trimmed values are omitted', () => {
     expect(sendBody({ ...f, briefOn: true, brief: '  ', folderOn: true, folder: '' })).not.toHaveProperty('brief');
+  });
+});
+
+describe('sendBlockers', () => {
+  const chk = (id: string, ok: boolean, warn?: boolean) => ({ id, ok, ...(warn ? { warn } : {}), text: `${id} text` });
+  test('a missing repo blocks and names the repo folders', () => {
+    expect(sendBlockers(pv({ repoFound: false, repo: 'app', host: 'Mac', roots: [] }))[0]).toBe('app is not on Mac: the host has no repo folders. Add one in the host profile (Edit).');
+    expect(sendBlockers(pv({ repoFound: false, repo: 'app', host: 'Mac', roots: ['~/code'] }))[0]).toBe('app is not on Mac under ~/code.');
+  });
+  test('ssh, tmux, claude and tunnel failures block; warnings and a bad root do not', () => {
+    const checks = [chk('ssh', false), chk('tmux', false), chk('claude', false), chk('tunnel', false), chk('login', true, true), chk('sleep', true, true), chk('roots', false)];
+    expect(sendBlockers(pv({ agent: 'claude', checks }))).toEqual(['ssh text', 'tmux text', 'claude text', 'tunnel text']);
+  });
+  test('claude does not block a codex worker', () => {
+    expect(sendBlockers(pv({ agent: 'codex', checks: [chk('claude', false)] }))).toEqual([]);
   });
 });

@@ -1,6 +1,11 @@
 import type { Host } from '../src/types';
 import type { LinkState } from '../src/ssh';
 import { slugify } from '../src/slug';
+import { checkClass, checkMark } from '../src/hostcheck';
+
+/** The text of an open host card before any check ran. A connected host must not say "Not connected". */
+export const noChecksText = (state: LinkState | string) => state === 'up' ? 'Connected. Use Run Doctor to check the host.'
+  : state === 'connecting' ? 'Connecting…' : 'Not connected. Use Connect or Run Doctor.';
 
 export type HostInfo = Host & { state: LinkState; latencyMs?: number; lastError?: string; workers?: number };
 export interface HostRow { id: string; name: string; group: string; labels: string[]; server: string; state: LinkState; workers: number }
@@ -55,7 +60,7 @@ export function initHosts(ctx: HostsCtx): { render: () => void } {
   const vp = document.getElementById('vp')!;
 
   const checkList = (cs: Check[] | 'loading' | undefined) => cs === 'loading' ? '<div class="hchk">Checking…</div>'
-    : cs ? cs.map(c => `<div class="hchk ${c.ok ? 'ok' : c.warn ? 'wn' : 'bad'}">${c.ok ? '✓' : c.warn ? '!' : '✗'} ${esc(c.text)}</div>`).join('') : '';
+    : cs ? cs.map(c => `<div class="hchk ${checkClass(c)}">${checkMark(c)} ${esc(c.text)}</div>`).join('') : '';
 
   async function runCheck(id: string) {
     checks.set(id, 'loading'); render();
@@ -85,7 +90,7 @@ export function initHosts(ctx: HostsCtx): { render: () => void } {
           <div class="hmain"><b>${esc(h.name)}</b><div class="meta">${esc(h.ssh)}</div></div>
           <span class="hcount" title="Workers on this host">${h.workers ?? 0}</span></div>
         ${h.lastError && h.state === 'error' ? `<div class="hchk bad">${esc(h.lastError)}</div>` : ''}
-        ${isOpen ? `<div class="hchecks">${checkList(checks.get(h.id)) || '<div class="hchk">Not connected. Use Connect or Run Doctor.</div>'}
+        ${isOpen ? `<div class="hchecks">${checkList(checks.get(h.id)) || `<div class="hchk">${noChecksText(h.state)}</div>`}
           <div class="hacts">${h.state === 'up' ? '<button class="tb" data-shell>Open Shell</button>' : ''}<button class="tb" data-doctor>Run Doctor</button>
             <button class="tb" data-link>${up ? 'Disconnect' : 'Connect'}</button>
             <button class="tb" data-edit>Edit</button></div></div>` : ''}
