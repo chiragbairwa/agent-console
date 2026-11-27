@@ -1,4 +1,5 @@
 import { basename, dirname, join } from 'node:path';
+import { VERSION } from './version';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { loadState, saveState } from './store';
@@ -156,7 +157,7 @@ export class Registry extends EventTarget {
   nameOf(id: string) { return this.get(id)?.name ?? id; }
   snapshot(): Extract<StateEvent, { t: 'snapshot' }> {
     const queued = Object.fromEntries([...this.queue].map(([k, v]) => [k, v.length]));
-    return { t: 'snapshot', state: structuredClone(this.state), needs: this.needs(), queued };
+    return { t: 'snapshot', state: structuredClone(this.state), needs: this.needs(), queued, version: VERSION };
   }
 
   // ---------- steps (flow view) ----------

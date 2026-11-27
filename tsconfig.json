@@ -3,7 +3,7 @@
     "target": "ESNext", "module": "ESNext", "moduleResolution": "bundler",
     "lib": ["ESNext", "DOM", "DOM.Iterable"], "types": ["bun"],
     "strict": true, "noEmit": true, "skipLibCheck": true, "allowImportingTsExtensions": true,
-    "jsx": "react-jsx"
+    "jsx": "react-jsx", "resolveJsonModule": true
   },
   "include": ["src", "web", "tests", "scripts"]
 }

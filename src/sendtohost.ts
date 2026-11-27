@@ -49,6 +49,14 @@ async function baseOf(w: Worker, run: LocalRun): Promise<string | undefined> {
   return undefined;
 }
 
+/** A branch name that the host does not have: the name itself, else <name>-<host>, else <name>-<host>-2, -3, … */
+export function freeBranch(want: string, hostId: string, taken: Set<string>): string {
+  if (!taken.has(want)) return want;
+  let c = `${want}-${hostId}`;
+  for (let i = 2; taken.has(c); i++) c = `${want}-${hostId}-${i}`;
+  return c;
+}
+
 /** Find the repo with the same folder name under a root of the host. */
 async function findRepo(link: HostLink, name: string): Promise<string | undefined> {
   return (await listRemoteRepos(link, link.host.roots)).find(r => r.name === name)?.path;
@@ -96,37 +104,36 @@ export async function sendToHost(reg: Registry, hosts: HostPool, o: SendOpts, de
   note('check', true, `${repo} on ${hostName}`);
 
   // --- bundle: the commits of the branch go over as one Git bundle.
-  // With no commits ahead of the base, git refuses an empty bundle. Then the new worker gets a new branch
-  // from the local HEAD commit, which the host repo must already hold.
-  let newBranch: { name: string; base: string } | undefined;
+  // The new worker always gets a new branch on the host, made from the sent commit. A branch on the host is never
+  // moved or reused: a second send still works, and the fetch never writes into a branch that the host has checked out.
+  let startAt: string | undefined; // the commit of the new worktree. Undefined: the HEAD of the host repo.
   if (o.branch) {
+    const sha = await run(['git', 'rev-parse', '--verify', `${branch}^{commit}`], w.cwd);
+    if (sha.code !== 0) { note('bundle', false, sha.err.trim() || 'git rev-parse failed'); return { steps }; }
+    startAt = sha.out.trim();
     const base = await baseOf(w, run);
     const n = base ? await run(['git', 'rev-list', '--count', `${base}..${branch}`], w.cwd) : undefined;
-    if (n && n.code === 0 && n.out.trim() === '0') {
-      const head = await run(['git', 'rev-parse', 'HEAD'], w.cwd);
-      if (head.code !== 0) { note('bundle', false, head.err.trim() || 'git rev-parse failed'); return { steps }; }
-      newBranch = { name: `${branch}-${link.host.id}`, base: head.out.trim() };
-      note('bundle', true, 'no commits to send');
-    }
-  }
-  if (o.branch && !newBranch) {
-    const tmp = `/tmp/ac-${w.id}-${randomBytes(4).toString('hex')}.bundle`;
-    try {
-      const base = await baseOf(w, run);
-      const b = await run(['git', 'bundle', 'create', '-', base ? `${base}..${branch}` : branch], w.cwd, { binary: true });
-      if (b.code !== 0) throw new Error(b.err.trim() || 'git bundle failed');
-      // exec takes text only. The bundle goes over as one line of base64. openssl exists on Linux and macOS.
-      const wr = await link.exec(['sh', '-c', 'umask 077; openssl base64 -d -A > "$1"', '_', tmp], Buffer.from(b.bytes).toString('base64'), { timeoutMs: SLOW_MS });
-      if (wr.code !== 0) throw new Error(wr.err.trim() || 'could not write the bundle');
-      const f = await link.exec(['git', '-C', repo, 'fetch', '--', tmp, `${branch}:${branch}`], undefined, { timeoutMs: SLOW_MS });
-      if (f.code !== 0) throw new Error(f.err.trim() || 'git fetch failed');
-      note('bundle', true, `${branch} (${b.bytes.length} bytes${base ? `, since ${base}` : ''})`);
-    } catch (e) {
-      note('bundle', false, msg(e));
+    // With no commits ahead of the base, git refuses an empty bundle. The host repo must hold the commit already.
+    if (n && n.code === 0 && n.out.trim() === '0') note('bundle', true, 'no commits to send');
+    else {
+      const tmp = `/tmp/ac-${w.id}-${randomBytes(4).toString('hex')}.bundle`;
+      try {
+        const b = await run(['git', 'bundle', 'create', '-', base ? `${base}..${branch}` : branch], w.cwd, { binary: true });
+        if (b.code !== 0) throw new Error(b.err.trim() || 'git bundle failed');
+        // exec takes text only. The bundle goes over as one line of base64. openssl exists on Linux and macOS.
+        const wr = await link.exec(['sh', '-c', 'umask 077; openssl base64 -d -A > "$1"', '_', tmp], Buffer.from(b.bytes).toString('base64'), { timeoutMs: SLOW_MS });
+        if (wr.code !== 0) throw new Error(wr.err.trim() || 'could not write the bundle');
+        // No target ref: only the objects (and FETCH_HEAD) arrive. The worktree starts from startAt.
+        const f = await link.exec(['git', '-C', repo, 'fetch', '--', tmp, branch], undefined, { timeoutMs: SLOW_MS });
+        if (f.code !== 0) throw new Error(f.err.trim() || 'git fetch failed');
+        note('bundle', true, `${branch} (${b.bytes.length} bytes${base ? `, since ${base}` : ''})`);
+      } catch (e) {
+        note('bundle', false, msg(e));
+        await link.exec(['rm', '-f', tmp]).catch(() => undefined);
+        return { steps };
+      }
       await link.exec(['rm', '-f', tmp]).catch(() => undefined);
-      return { steps };
     }
-    await link.exec(['rm', '-f', tmp]).catch(() => undefined);
   }
 
   // --- folder
@@ -162,11 +169,14 @@ export async function sendToHost(reg: Registry, hosts: HostPool, o: SendOpts, de
       note('patch', true, `${d.out.split('\n').length} lines applied`);
     };
   }
+  const refs = await link.exec(['git', '-C', repo, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/']);
+  if (refs.code !== 0) { note('start', false, refs.err.trim() || 'could not list the branches on the host'); return { steps }; }
+  const name = freeBranch(branch, link.host.id, new Set(refs.out.split('\n').map(x => x.trim()).filter(Boolean)));
   let nw: Worker;
   try {
     nw = await reg.spawn({
       name: `${w.name}-${link.host.id}`, repo, host: link.host.id,
-      worktree: newBranch ? { branch: newBranch.name, base: newBranch.base } : { branch, existing: o.branch }, ...(o.brief ? { prompt: o.brief } : {}), ...(hook ? { beforeStart: hook } : {}),
+      worktree: { branch: name, ...(startAt ? { base: startAt } : {}) }, ...(o.brief ? { prompt: o.brief } : {}), ...(hook ? { beforeStart: hook } : {}),
     });
     note('start', true, `${nw.name} in ${nw.cwd}`);
   } catch (e) { if (!patchFailed) note('start', false, msg(e)); return { steps }; }

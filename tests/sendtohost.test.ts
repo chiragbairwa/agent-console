@@ -94,7 +94,9 @@ test('bundle: git bundle create runs locally, then git fetch on the host, then r
   expect(Buffer.from(write.stdin!, 'base64').toString('latin1')).toStartWith('# v2 git bundle');
   const fetchI = remote.findIndex(x => x.cmd.includes("'fetch'"));
   expect(remote[fetchI]!.cmd).toContain("'-C' '/Users/me/code/app'");
-  expect(remote[fetchI]!.cmd).toContain("'feat/x:feat/x'");
+  // No target ref: a fetch into a branch that the host has checked out would be refused.
+  expect(remote[fetchI]!.cmd).toMatch(/'\/tmp\/ac-src-[a-z0-9]+\.bundle' 'feat\/x'$/);
+  expect(remote[fetchI]!.cmd).not.toContain(':feat/x');
   expect(remote[fetchI + 1]!.cmd).toContain("'rm' '-f'");
 });
 
@@ -109,13 +111,43 @@ test('a failed fetch stops the move; the source is not stopped; Activity names b
   expect(remote.some(x => x.cmd.includes("'rm' '-f'"))).toBe(true);
 });
 
-test('the new worker checks out the existing branch and starts on the host', async () => {
+test('the new worker gets the same branch name, made from the sent commit, when the host does not have it', async () => {
   const { reg, w } = await mkReg();
+  const sha = git(src, 'rev-parse', 'feat/x').trim();
   const r = await sendToHost(reg, hosts, { ...base, id: w.id });
   expect(r.worker!.host).toBe('mac');
   expect(r.worker!.name).toBe('Src-mac');
-  expect(remote.some(x => x.cmd.includes("'worktree' 'add' '--'") && x.cmd.includes("'feat/x'"))).toBe(true);
-  expect(remote.some(x => x.cmd.includes("'worktree' 'add' '-b'"))).toBe(false);
+  const add = remote.find(x => x.cmd.includes("'worktree' 'add'"))!;
+  expect(add.cmd).toContain("'-b' 'feat/x' '--'");
+  expect(add.cmd).toEndWith(`'${sha}'`);
+});
+
+test('a second send never reuses a host branch: feat/x and feat/x-mac exist, so feat/x-mac-2', async () => {
+  const { reg, w } = await mkReg();
+  answers.push(c => c.includes("'for-each-ref'") ? { out: 'main\nfeat/x\nfeat/x-mac\n' } : undefined);
+  const r = await sendToHost(reg, hosts, { ...base, id: w.id });
+  expect(r.steps.find(s => s.name === 'start')).toMatchObject({ ok: true });
+  expect(remote.find(x => x.cmd.includes("'worktree' 'add'"))!.cmd).toContain("'-b' 'feat/x-mac-2' '--'");
+});
+
+test('a repo with no remote sends all of main, and main checked out on the host does not stop it', async () => {
+  const { reg, w } = await mkReg();
+  w.branch = 'main';
+  answers.push(c => c.includes("'for-each-ref'") ? { out: 'main\n' } : undefined);
+  const r = await sendToHost(reg, hosts, { ...base, id: w.id }, { run: realRun });
+  expect(r.steps.map(s => [s.name, s.ok])).toEqual([['check', true], ['bundle', true], ['start', true]]);
+  expect(remote.find(x => x.cmd.includes("'fetch'"))!.cmd).toEndWith("'main'");
+  expect(remote.find(x => x.cmd.includes("'worktree' 'add'"))!.cmd).toContain("'-b' 'main-mac' '--'");
+});
+
+test('branch=false: the new branch name is free and starts at the host HEAD', async () => {
+  const { reg, w } = await mkReg();
+  answers.push(c => c.includes("'for-each-ref'") ? { out: 'feat/x\n' } : undefined);
+  const r = await sendToHost(reg, hosts, { ...base, branch: false, id: w.id });
+  expect(r.steps.find(s => s.name === 'start')).toMatchObject({ ok: true });
+  const add = remote.find(x => x.cmd.includes("'worktree' 'add'"))!.cmd;
+  expect(add).toContain("'-b' 'feat/x-mac' '--'");
+  expect(add).toMatch(/'--' '[^']+'$/); // no start commit: the host HEAD
 });
 
 test('patch is applied with git apply on the new worktree', async () => {
@@ -271,6 +303,7 @@ test('folder: a hidden home folder outside the worker folder is still refused', 
 test('0 commits ahead: no empty bundle; the new worker gets a new branch from the local HEAD commit', async () => {
   const { reg, w } = await mkReg();
   git(src, 'update-ref', 'refs/remotes/origin/main', 'feat/x');
+  answers.push(c => c.includes("'for-each-ref'") ? { out: 'feat/x\n' } : undefined);
   const head = git(src, 'rev-parse', 'HEAD').trim();
   const r = await sendToHost(reg, hosts, { ...base, id: w.id }, { run: realRun });
   expect(r.steps.find(s => s.name === 'bundle')).toEqual({ name: 'bundle', ok: true, text: 'no commits to send' });

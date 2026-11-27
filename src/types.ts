@@ -70,7 +70,7 @@ export interface State {
 }
 
 export type StateEvent =
-  | { t: 'snapshot'; state: State; needs: Need[]; queued: Record<string, number> }
+  | { t: 'snapshot'; state: State; needs: Need[]; queued: Record<string, number>; version?: string }
   | { t: 'worker'; worker: Worker }
   | { t: 'removed'; id: string }
   | { t: 'links'; links: Link[]; cut: string[] }

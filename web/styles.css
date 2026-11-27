@@ -32,6 +32,8 @@ select option{background:var(--panel);color:var(--ink)}
 #app{display:grid;grid-template-rows:auto auto 1fr auto;height:100vh}
 .top{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
 .top h1{font-size:15px;margin:0 4px 0 0}
+.top .ver{font:inherit;font-size:11px;color:var(--muted);background:none;border:0;padding:0 6px 0 0;cursor:default}
+.top .ver.stale{color:var(--run);cursor:pointer;text-decoration:underline}
 .conn{font-size:12px;margin-right:6px}.conn.on{color:var(--ok)}.conn.off{color:var(--warn)}
 .tb{border:1px solid var(--line);background:var(--panel);border-radius:6px;padding:4px 10px}
 .tb:hover{border-color:var(--accent)}

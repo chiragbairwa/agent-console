@@ -8,6 +8,8 @@ import { initHosts, type HostInfo } from './hosts';
 import { laneLayout, type Lane } from './lanes';
 import { openSendDialog } from './sendtohost';
 import { pasteText, pathsFromDrop } from './drop';
+import { VERSION } from '../src/version';
+import { versionLabel } from './version';
 
 /** One agent from GET /api/agents. */
 interface AgentOpt { key: string; label: string; kind: 'select' | 'text'; choices?: string[]; default?: string }
@@ -269,10 +271,21 @@ function feed(text: string, at = Date.now()) {
   while (f.children.length > 200) f.lastElementChild!.remove();
 }
 
+// ---------- version ----------
+/** Show the page version. When the server is newer (an old page in a window), offer a reload. */
+function showVersion(server?: string) {
+  const b = document.getElementById('ver') as HTMLButtonElement | null; if (!b) return;
+  const l = versionLabel(VERSION, server);
+  b.textContent = l.text; b.title = l.title; b.classList.toggle('stale', l.stale);
+  b.onclick = l.stale ? () => location.reload() : null;
+}
+showVersion();
+
 // ---------- state socket ----------
 function onEvent(ev: StateEvent) {
   switch (ev.t) {
     case 'snapshot':
+      showVersion(ev.version);
       for (const id of [...workers.keys()]) if (!ev.state.workers.some(w => w.id === id)) removeNode(id);
       for (const w of ev.state.workers) workers.set(w.id, w);
       links = ev.state.links; needs = ev.needs;
