@@ -12,7 +12,7 @@ export async function writeRemoteFile(link: HostLink, path: string, body: string
 const MAX_DIRS = 500;
 
 /** Expand a leading "~/" with the home folder of the host. */
-async function expand(link: HostLink, p: string): Promise<string> {
+export async function expand(link: HostLink, p: string): Promise<string> {
   if (p === '~') return link.home();
   return p.startsWith('~/') ? posix.join(await link.home(), p.slice(2)) : p;
 }

@@ -1,4 +1,5 @@
 import type { HostLink } from './ssh';
+import { expand } from './remotefs';
 
 export interface Check { id: string; ok: boolean; warn?: boolean; text: string }
 
@@ -39,10 +40,14 @@ export async function checkHost(link: HostLink, consolePort: number): Promise<Ch
   });
   await run('login', async () => {
     // Without the claude binary, "auth status" fails too. Do not report that as a missing login.
-    if (!claudeFound) return { ok: true, warn: true, text: 'The login cannot be checked: claude not found on the host.' };
+    if (!claudeFound) return { ok: true, warn: true, text: 'The login cannot be checked until the claude check passes.' };
     const r = await sh(['claude', 'auth', 'status']);
-    return r.code === 0 ? { ok: true, text: 'Claude is logged in' }
-      : { ok: true, warn: true, text: 'Claude is not logged in. Run "claude login" on the host, or set CLAUDE_CODE_OAUTH_TOKEN there.' };
+    if (r.code === 0) return { ok: true, text: 'Claude is logged in' };
+    // On macOS, "claude login" keeps the login in the Keychain. An SSH login cannot read a locked Keychain,
+    // so Claude can work in a Terminal on the Mac and still be logged out for a worker.
+    return { ok: true, warn: true, text: os === 'Darwin'
+      ? 'Claude is not logged in for an SSH login. On macOS the login is in the Keychain, which SSH cannot read. Run "claude setup-token" on the Mac and add "export CLAUDE_CODE_OAUTH_TOKEN=<token>" to ~/.zshenv there.'
+      : 'Claude is not logged in. Run "claude login" on the host, or set CLAUDE_CODE_OAUTH_TOKEN there.' };
   });
   await run('tunnel', async () => {
     const r = await sh(['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', `http://127.0.0.1:${link.tunnelPort()}/api/health`]);
@@ -60,7 +65,8 @@ export async function checkHost(link: HostLink, consolePort: number): Promise<Ch
     const roots = link.host.roots;
     if (!roots.length) return { ok: true, text: 'no repo folders set' };
     const bad: string[] = [];
-    for (const r of roots) if ((await sh(['test', '-d', r])).code !== 0) bad.push(r);
+    // A root such as "~/code" is passed quoted, so the remote shell does not expand "~". Expand it here.
+    for (const r of roots) if ((await sh(['test', '-d', await expand(link, r)])).code !== 0) bad.push(r);
     return bad.length ? { ok: false, text: `Folder not found: ${bad.join(', ')}` } : { ok: true, text: roots.join(', ') };
   });
   return out;

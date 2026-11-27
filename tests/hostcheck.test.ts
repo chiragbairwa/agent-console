@@ -95,7 +95,7 @@ test('checkHost: claude not found gives no false "not logged in"; login is not c
   const l = c.find(x => x.id === 'login')!;
   expect(l).toMatchObject({ ok: true, warn: true });
   expect(l.text).not.toContain('not logged in');
-  expect(l.text).toContain('claude not found');
+  expect(l.text).toContain('cannot be checked');
 });
 test('checkHost: the PATH hint names ~/.local/bin of the native installer', async () => {
   const c = await checkHost(await up(link({ ...base, "'--version'": { code: 127 } })), 7878);
@@ -103,4 +103,30 @@ test('checkHost: the PATH hint names ~/.local/bin of the native installer', asyn
 });
 test('checkClass: a warning is never painted as ok', () => {
   expect([checkClass({ id: 'a', ok: true, text: '' }), checkClass({ id: 'a', ok: true, warn: true, text: '' }), checkClass({ id: 'a', ok: false, text: '' })]).toEqual(['ok', 'wn', 'bad']);
+});
+test('checkHost: a root with "~/" is tested at the home folder of the host, not as a quoted "~"', async () => {
+  const seen: string[] = [];
+  const h: Host = { ...host, roots: ['~/code'] };
+  const spawn = async (cmd: string[]): Promise<ExecResult> => {
+    const remote = cmd[cmd.length - 1]!;
+    if (remote.includes('HOME')) return { out: '/Users/me', err: '', code: 0 };
+    if (remote.includes("'test'")) { seen.push(remote); return { out: '', err: '', code: remote.includes("'/Users/me/code'") ? 0 : 1 }; }
+    for (const [k, v] of Object.entries(base)) if (remote.includes(k)) return { err: '', code: 0, ...v };
+    return { out: 'ok\n', err: '', code: 0 };
+  };
+  const c = await checkHost(await up(new HostLink(h, { consolePort: 7878, sockDir: '/tmp/ac-hc-test', spawn })), 7878);
+  expect(c.find(x => x.id === 'roots')).toEqual({ id: 'roots', ok: true, text: '~/code' });
+  expect(seen[0]).toContain("'/Users/me/code'");
+});
+test('checkHost: no login on macOS names the Keychain that an SSH login cannot read', async () => {
+  const c = await checkHost(await up(link({ ...base, "'uname'": { out: 'Darwin\n' }, "'pmset'": { out: ' sleep 0\n' }, "'auth'": { code: 1 } })), 7878);
+  const l = c.find(x => x.id === 'login')!;
+  expect(l).toMatchObject({ ok: true, warn: true });
+  expect(l.text).toContain('Keychain');
+  expect(l.text).toContain('claude setup-token');
+  expect(l.text).toContain('~/.zshenv');
+});
+test('checkHost: the login is not checked when the claude check failed for any reason', async () => {
+  const c = await checkHost(await up(link({ ...base, "'--version'": { code: 255, err: 'timed out' } })), 7878);
+  expect(c.find(x => x.id === 'login')!.text).toBe('The login cannot be checked until the claude check passes.');
 });
